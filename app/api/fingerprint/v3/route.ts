@@ -1,0 +1,492 @@
+import { NextRequest } from 'next/server';
+import { nanoid } from 'nanoid';
+import { streamClaude } from '@/lib/claude';
+import {
+  buildFingerprintV3Stage1Prompt,
+  type FingerprintV3Article,
+} from '@/lib/prompts/fingerprint-v3-stage1';
+import {
+  buildFingerprintV3Stage2Prompt,
+  type FingerprintV3Stage1Output,
+} from '@/lib/prompts/fingerprint-v3-stage2';
+import { buildFingerprintV3CrossPlatformPrompt } from '@/lib/prompts/fingerprint-v3-cross-platform';
+import { getDb } from '@/lib/db';
+
+/**
+ * Agent J · v3 指纹拆解
+ * ----------------------------------------------------------------
+ * 三阶段 SSE：
+ *   Stage 1（并发，最多 3）：每篇独立分析，提取局部策略碎片 + 平台/领域调整
+ *   Stage 2（串行）        ：跨篇综合，按平台分组 + 按领域分组 + 策略碎片库
+ *   Stage 3（串行，可选）  ：当 platforms_analyzed.length >= 2 时，跨平台深度对比
+ *
+ * 与 v2 兼容：v2 路由保留，本路由独立挂在 /api/fingerprint/v3。
+ * fingerprints 表新写入 version_schema='v3' 与 4 个 v3 专属 JSON 列。
+ */
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+interface IncomingArticleInput {
+  title?: string;
+  content?: string;
+  url?: string;
+  platform?: string;
+  medium?: 'text' | 'video' | 'mixed';
+  domain?: string;
+}
+
+interface IncomingPayload {
+  author_name?: string;
+  articles?: IncomingArticleInput[];
+}
+
+const MIN_ARTICLES = 2;
+const MAX_ARTICLES = 15;
+const MIN_CONTENT_CHARS = 80;
+const STAGE1_CONCURRENCY = 3;
+
+function jsonError(message: string, status = 400) {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+  });
+}
+
+function stripJsonFence(raw: string): string {
+  const fenceMatch = raw.match(/```json\s*([\s\S]*?)```/i);
+  if (fenceMatch) return fenceMatch[1].trim();
+  const firstBrace = raw.indexOf('{');
+  const lastBrace = raw.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    return raw.slice(firstBrace, lastBrace + 1).trim();
+  }
+  return raw.trim();
+}
+
+function pickAvatarChar(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return 'A';
+  const cjk = trimmed.match(/[一-鿿]/);
+  if (cjk) return cjk[0];
+  return trimmed.slice(0, 1).toUpperCase();
+}
+
+interface PreparedArticle extends FingerprintV3Article {
+  url?: string;
+}
+
+function prepareArticle(input: IncomingArticleInput, idx: number): PreparedArticle {
+  const platform = (input.platform ?? '').trim();
+  if (!platform) {
+    throw new Error(`第 ${idx + 1} 篇没指定 platform（公众号 / B 站 / 知乎 / ...）`);
+  }
+  const medium = (input.medium ?? 'text') as 'text' | 'video' | 'mixed';
+  if (!['text', 'video', 'mixed'].includes(medium)) {
+    throw new Error(`第 ${idx + 1} 篇 medium 取值只能是 text / video / mixed`);
+  }
+  const content = (input.content ?? '').trim();
+  if (content.length < MIN_CONTENT_CHARS) {
+    throw new Error(
+      `第 ${idx + 1} 篇正文不足 ${MIN_CONTENT_CHARS} 字，再多贴一点`,
+    );
+  }
+  const domain = (input.domain ?? '').trim() || '未指定';
+  return {
+    title: (input.title ?? '').trim() || undefined,
+    content,
+    url: (input.url ?? '').trim() || undefined,
+    platform,
+    medium,
+    domain,
+  };
+}
+
+async function runStage1WithConcurrency(
+  prepared: PreparedArticle[],
+  signal: AbortSignal,
+  onItemStart: (i: number) => void,
+  onItemDone: (i: number, rawJson: string) => void,
+  onChunk: (i: number, text: string) => void,
+): Promise<FingerprintV3Stage1Output[]> {
+  const outputs: (FingerprintV3Stage1Output | null)[] = prepared.map(() => null);
+  let cursor = 0;
+
+  async function worker() {
+    while (true) {
+      if (signal.aborted) return;
+      const idx = cursor++;
+      if (idx >= prepared.length) return;
+      onItemStart(idx);
+      const prompt = buildFingerprintV3Stage1Prompt(prepared[idx], idx, prepared.length);
+      const raw = await streamClaude(prompt, {
+        signal,
+        onChunk: (text) => onChunk(idx, text),
+      });
+      const cleaned = stripJsonFence(raw);
+      outputs[idx] = {
+        index: idx,
+        platform: prepared[idx].platform,
+        domain: prepared[idx].domain || '未指定',
+        medium: prepared[idx].medium,
+        title: prepared[idx].title,
+        rawJson: cleaned,
+      };
+      onItemDone(idx, cleaned);
+    }
+  }
+
+  const n = Math.min(STAGE1_CONCURRENCY, prepared.length);
+  const workers = Array.from({ length: n }, () => worker());
+  await Promise.all(workers);
+
+  return outputs.filter((o): o is FingerprintV3Stage1Output => o !== null);
+}
+
+export async function POST(req: NextRequest) {
+  let body: IncomingPayload;
+  try {
+    body = (await req.json()) as IncomingPayload;
+  } catch {
+    return jsonError('请求体不是合法 JSON');
+  }
+
+  const authorName = (body.author_name ?? '').trim();
+  const articles = Array.isArray(body.articles) ? body.articles : [];
+
+  if (!authorName) {
+    return jsonError('博主名不能为空');
+  }
+  if (articles.length < MIN_ARTICLES || articles.length > MAX_ARTICLES) {
+    return jsonError(
+      `文章数量需要在 ${MIN_ARTICLES} 到 ${MAX_ARTICLES} 篇之间，当前 ${articles.length} 篇`,
+    );
+  }
+
+  const encoder = new TextEncoder();
+  const abortCtrl = new AbortController();
+  req.signal.addEventListener('abort', () => abortCtrl.abort());
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let closed = false;
+      const send = (event: string, data: unknown) => {
+        if (closed) return;
+        const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+        try {
+          controller.enqueue(encoder.encode(payload));
+        } catch {/* controller closed */}
+      };
+      const closeStream = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {/* ignore */}
+      };
+
+      try {
+        send('open', { ok: true, total: articles.length });
+
+        // ---- Step 1: 准备 ----
+        send('stage', { stage: 'prepare', message: '正在准备样本' });
+        const prepared: PreparedArticle[] = [];
+        for (let i = 0; i < articles.length; i++) {
+          if (abortCtrl.signal.aborted) {
+            send('error', { message: '已中止', phase: 'abort' });
+            closeStream();
+            return;
+          }
+          try {
+            const p = prepareArticle(articles[i], i);
+            prepared.push(p);
+            send('article', {
+              index: i,
+              status: 'ready',
+              title: p.title || '（无标题）',
+              platform: p.platform,
+              medium: p.medium,
+              domain: p.domain,
+              chars: p.content.length,
+            });
+          } catch (err) {
+            send('error', {
+              message: (err as Error).message || '准备样本时出错',
+              phase: 'prepare',
+              index: i,
+            });
+            closeStream();
+            return;
+          }
+        }
+
+        const platformsAnalyzed = Array.from(
+          new Set(prepared.map((p) => p.platform).filter(Boolean)),
+        );
+
+        // ---- Step 2: Stage1 ----
+        send('stage', {
+          stage: 'stage1',
+          message: '正在逐篇拆出局部策略碎片',
+          concurrency: STAGE1_CONCURRENCY,
+        });
+        const t1 = Date.now();
+        let stage1Outputs: FingerprintV3Stage1Output[] = [];
+        try {
+          stage1Outputs = await runStage1WithConcurrency(
+            prepared,
+            abortCtrl.signal,
+            (i) => send('article', { index: i, status: 'analyzing' }),
+            (i, rawJson) => {
+              let okJson = true;
+              try { JSON.parse(rawJson); } catch { okJson = false; }
+              send('article', {
+                index: i,
+                status: okJson ? 'analyzed' : 'analyzed-loose',
+              });
+            },
+            (i, text) => send('chunk', { stage: 'stage1', index: i, text }),
+          );
+        } catch (err) {
+          send('error', {
+            message:
+              '某一篇拆解时模型没回来：' +
+              ((err as Error).message || '未知错误'),
+            phase: 'stage1',
+          });
+          closeStream();
+          return;
+        }
+        const stage1Ms = Date.now() - t1;
+        send('stage', { stage: 'stage1', status: 'done', ms: stage1Ms });
+
+        // ---- Step 3: Stage2 ----
+        send('stage', { stage: 'stage2', message: '正在跨篇综合按平台 / 领域分组' });
+        const t2 = Date.now();
+        let stage2Raw = '';
+        try {
+          const stage2Prompt = buildFingerprintV3Stage2Prompt(
+            authorName,
+            stage1Outputs,
+          );
+          stage2Raw = await streamClaude(stage2Prompt, {
+            signal: abortCtrl.signal,
+            onChunk: (text) => send('chunk', { stage: 'stage2', text }),
+          });
+        } catch (err) {
+          send('error', {
+            message:
+              '综合阶段模型没回来：' + ((err as Error).message || '未知错误'),
+            phase: 'stage2',
+          });
+          closeStream();
+          return;
+        }
+        const stage2Ms = Date.now() - t2;
+
+        const stage2Cleaned = stripJsonFence(stage2Raw);
+        let fingerprint: Record<string, unknown>;
+        try {
+          fingerprint = JSON.parse(stage2Cleaned);
+        } catch (parseErr) {
+          send('error', {
+            message: 'stage2 输出不是合法 JSON，再试一次大概率就好',
+            phase: 'parse-stage2',
+            detail: (parseErr as Error).message,
+            sample: stage2Cleaned.slice(0, 280),
+          });
+          closeStream();
+          return;
+        }
+        send('stage', { stage: 'stage2', status: 'done', ms: stage2Ms });
+
+        // ---- Step 4: Stage3（可选） ----
+        let stage3Ms = 0;
+        if (platformsAnalyzed.length >= 2) {
+          send('stage', {
+            stage: 'stage3',
+            message: '正在跑跨平台深度对比报告',
+          });
+          const t3 = Date.now();
+          try {
+            const stage3Prompt = buildFingerprintV3CrossPlatformPrompt({
+              authorName,
+              stage2RawJson: stage2Cleaned,
+            });
+            const stage3Raw = await streamClaude(stage3Prompt, {
+              signal: abortCtrl.signal,
+              onChunk: (text) => send('chunk', { stage: 'stage3', text }),
+            });
+            const stage3Cleaned = stripJsonFence(stage3Raw);
+            try {
+              const stage3Obj = JSON.parse(stage3Cleaned) as Record<string, unknown>;
+              // 用 stage3 替换 stage2 给的初稿 cross_platform_report
+              fingerprint.cross_platform_report = stage3Obj;
+            } catch (parseErr) {
+              // 不致命：保留 stage2 初稿，给 client 一个 warn
+              send('warn', {
+                phase: 'parse-stage3',
+                message: 'stage3 输出不是合法 JSON，沿用 stage2 初稿',
+                detail: (parseErr as Error).message,
+              });
+            }
+          } catch (err) {
+            send('warn', {
+              phase: 'stage3',
+              message:
+                '跨平台对比阶段模型没回来：' +
+                ((err as Error).message || '未知错误') +
+                '。沿用 stage2 初稿。',
+            });
+          }
+          stage3Ms = Date.now() - t3;
+          send('stage', { stage: 'stage3', status: 'done', ms: stage3Ms });
+        } else {
+          send('stage', {
+            stage: 'stage3',
+            status: 'skipped',
+            reason: '只有单平台样本，跳过跨平台对比',
+          });
+        }
+
+        // ---- Step 5: 落库 ----
+        try {
+          const db = getDb();
+          const authorId = nanoid(12);
+          const fingerprintId = nanoid(14);
+          const now = Date.now();
+
+          const platformsFromFp = Array.isArray(
+            (fingerprint as { platforms_analyzed?: unknown[] }).platforms_analyzed,
+          )
+            ? (fingerprint as { platforms_analyzed: unknown[] }).platforms_analyzed
+            : platformsAnalyzed;
+          // 用 stage2 字段，平台多但作者级 platform 字段挑第一个填进 authors 表（向后兼容）
+          const primaryPlatform =
+            (Array.isArray(platformsFromFp) && typeof platformsFromFp[0] === 'string'
+              ? (platformsFromFp[0] as string)
+              : null) ?? platformsAnalyzed[0] ?? null;
+
+          const insertAuthor = db.prepare(
+            `INSERT INTO authors (id, name, platform, avatar_emoji, created_at, last_used_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          );
+          const insertFingerprint = db.prepare(
+            `INSERT INTO fingerprints
+              (id, author_id, source_articles_json, fingerprint_json, raw_response,
+               model_version, created_at, hit_count, version, article_count,
+               version_schema, platform_fingerprints_json, domain_variations_json,
+               cross_platform_report_json, strategy_fragments_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, 3, ?, 'v3', ?, ?, ?, ?)`,
+          );
+          const insertStrategy = db.prepare(
+            `INSERT INTO strategies
+              (id, fingerprint_id, tag, scope_json, description, example, when_to_use,
+               created_at, platform_scope_json, domain_scope_json, why_works, title)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          );
+
+          const sourceArticlesSummary = prepared.map((p) => ({
+            title: p.title,
+            platform: p.platform,
+            domain: p.domain,
+            medium: p.medium,
+            url: p.url,
+            chars: p.content.length,
+          }));
+
+          const strategyFragments = Array.isArray(
+            (fingerprint as { strategy_fragments?: unknown[] }).strategy_fragments,
+          )
+            ? ((fingerprint as { strategy_fragments: unknown[] }).strategy_fragments as Record<string, unknown>[])
+            : [];
+
+          const platformFingerprints =
+            (fingerprint as { platform_fingerprints?: unknown }).platform_fingerprints ?? null;
+          const domainVariations =
+            (fingerprint as { domain_variations?: unknown }).domain_variations ?? null;
+          const crossPlatformReport =
+            (fingerprint as { cross_platform_report?: unknown }).cross_platform_report ?? null;
+
+          const tx = db.transaction(() => {
+            insertAuthor.run(
+              authorId,
+              authorName,
+              primaryPlatform,
+              pickAvatarChar(authorName),
+              now,
+              now,
+            );
+            insertFingerprint.run(
+              fingerprintId,
+              authorId,
+              JSON.stringify(sourceArticlesSummary),
+              JSON.stringify(fingerprint),
+              stage2Raw,
+              'claude-code-cli-v3',
+              now,
+              prepared.length,
+              platformFingerprints ? JSON.stringify(platformFingerprints) : null,
+              domainVariations ? JSON.stringify(domainVariations) : null,
+              crossPlatformReport ? JSON.stringify(crossPlatformReport) : null,
+              strategyFragments.length ? JSON.stringify(strategyFragments) : null,
+            );
+            // 写 strategies（v3 每条带 platform_scope / domain_scope / why_works / title）
+            for (const s of strategyFragments) {
+              insertStrategy.run(
+                nanoid(14),
+                fingerprintId,
+                (s.tag as string) || null,
+                JSON.stringify(s.domain_scope ?? s.platform_scope ?? []), // 兼容 v2 的 scope_json
+                (s.description as string) || null,
+                (s.example as string) || null,
+                (s.when_to_use as string) || null,
+                now,
+                JSON.stringify(s.platform_scope ?? []),
+                JSON.stringify(s.domain_scope ?? []),
+                (s.why_works as string) || null,
+                (s.title as string) || null,
+              );
+            }
+          });
+          tx();
+
+          send('done', {
+            fingerprint_id: fingerprintId,
+            author_id: authorId,
+            schema: 'v3',
+            article_count: prepared.length,
+            platforms_analyzed: platformsAnalyzed,
+            strategy_count: strategyFragments.length,
+            timings_ms: {
+              stage1: stage1Ms,
+              stage2: stage2Ms,
+              stage3: stage3Ms,
+              total: stage1Ms + stage2Ms + stage3Ms,
+            },
+          });
+        } catch (dbErr) {
+          send('error', {
+            message: '本地数据库这次没接住，看一眼 console 再来一遍',
+            phase: 'db',
+            detail: (dbErr as Error).message,
+          });
+        }
+      } finally {
+        closeStream();
+      }
+    },
+    cancel() {
+      abortCtrl.abort();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    },
+  });
+}

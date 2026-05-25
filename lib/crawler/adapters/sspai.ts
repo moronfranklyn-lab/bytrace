@@ -20,6 +20,13 @@ export const adapter: SiteAdapter = {
   matches(url: URL): boolean {
     return /(^|\.)sspai\.com$/i.test(url.hostname);
   },
+  urlKind(url: URL): 'article' | 'index' | 'unknown' {
+    if (/^\/post\/\d+/.test(url.pathname)) return 'article';
+    if (/^\/u\//.test(url.pathname) || url.pathname === '/' || /^\/(matrix|column|page)/i.test(url.pathname)) {
+      return 'index';
+    }
+    return 'unknown';
+  },
   async crawlArticle(url: URL): Promise<CrawledArticle | CrawlError> {
     const html = await fetchHtml(url.toString());
     if (typeof html !== 'string') return html;

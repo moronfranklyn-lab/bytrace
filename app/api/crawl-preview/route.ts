@@ -1,13 +1,18 @@
 import { NextRequest } from 'next/server';
-import { crawlArticle, crawlAuthorIndex, detectUrlType, isCrawlError } from '@/lib/crawler';
+import { crawlArticle, crawlAuthorIndex, detectUrlType, detectUrlKind, isCrawlError } from '@/lib/crawler';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 interface ReqBody {
   url?: string;
-  /** Agent I 增：'index' 时调 crawlAuthorIndex，否则按原行为爬单篇。 */
-  mode?: 'article' | 'index';
+  /**
+   * 'article'：单篇（默认 / 旧行为）
+   * 'index'：作者主页/板块页拉文章列表
+   * 'auto'：先 detectUrlKind，是 index 就走 index 模式，是 article 就走 article；
+   *         unknown 时按 article 兜底——给前端 hint 提示用户切换
+   */
+  mode?: 'article' | 'index' | 'auto';
 }
 
 /**
@@ -27,9 +32,16 @@ export async function POST(req: NextRequest) {
     return jsonError('请求体不是合法 JSON');
   }
   const url = (body.url ?? '').trim();
-  const mode = body.mode === 'index' ? 'index' : 'article';
   if (!url) {
     return jsonError('URL 不能为空');
+  }
+  let mode: 'article' | 'index' = 'article';
+  let autoDetected: 'article' | 'index' | 'unknown' | null = null;
+  if (body.mode === 'index') {
+    mode = 'index';
+  } else if (body.mode === 'auto') {
+    autoDetected = detectUrlKind(url);
+    mode = autoDetected === 'index' ? 'index' : 'article';
   }
 
   const typeInfo = detectUrlType(url);
@@ -70,9 +82,11 @@ export async function POST(req: NextRequest) {
       return new Response(
         JSON.stringify({
           ok: true,
+          mode: 'index',
           platform: idx.platform,
           author_name: idx.author_name,
           article_urls: idx.article_urls,
+          auto_detected_kind: autoDetected,
         }),
         { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } },
       );
@@ -98,6 +112,7 @@ export async function POST(req: NextRequest) {
     return new Response(
       JSON.stringify({
         ok: true,
+        mode: 'article',
         platform: typeInfo.platform,
         title: result.title,
         preview,
@@ -109,6 +124,7 @@ export async function POST(req: NextRequest) {
         // 走 Apify 时附带本次成本，前端 toast 可显示「本次消耗 $X」
         apify_cost_usd: result.apify_cost_usd ?? null,
         apify_platform: result.apify_platform ?? null,
+        auto_detected_kind: autoDetected,
       }),
       {
         status: 200,

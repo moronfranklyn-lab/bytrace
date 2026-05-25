@@ -1,5 +1,5 @@
 /**
- * 9 个目标平台的写作 trait 元数据。Step 1（平台选择）和 refine prompt
+ * 7 个目标平台的写作 trait 元数据。Step 1（平台选择）和 refine prompt
  * 都从这里取数据，避免两处定义漂移。
  *
  * 设计约束：
@@ -8,6 +8,12 @@
  * - hook_position：钩子落点；pacing：节奏密度。这两个值在 article / refine
  *   prompt 里被引用，让模型按平台调整。
  * - tone_tag：给 UI 卡片角标用的一两字标签。
+ *
+ * 视频平台中 bilibili 已恢复在 PLATFORMS（OpenCLI 字幕通道接入后可拆 UP 主指纹）。
+ * douyin / youtube 仍在 HIDDEN_PLATFORMS：
+ *   - douyin：CLAUDE.md v2 列为高风险禁批量
+ *   - youtube：暂未接 OpenCLI 通道，字幕仍依赖 Data API key
+ * 历史数据库 platform 字段使用这些 key 时仍能 getPlatform() 正确解析。
  */
 
 export type PlatformKey =
@@ -67,27 +73,6 @@ export const PLATFORMS: PlatformTrait[] = [
       '不要在正文里放"点赞在看转发"这类运营话术',
     ],
     ui_hint: '2000-4500 字 · 深度长文',
-  },
-  {
-    key: 'bilibili',
-    name: 'B 站长视频文案',
-    tone_tag: '口播',
-    word_range_min: 3000,
-    word_range_max: 6000,
-    voice: '口播逐字稿 · 偏松弛网感 · 强镜头感 · 留弹幕互动钩子',
-    structure: '开场钩 + 章节卡 + 多段拆解 + 反转 / 总结 + 留白下集预告',
-    hook_position: '前 15 秒（约 80 字）必须立钩；每 90-120 秒一个小钩',
-    pacing: '语速 4-5 字/秒；短句为主，长短交错，避免连续两句长句',
-    do_extra: [
-      '逐字稿格式，标点按口播停顿放',
-      '关键转场写成单独一行，便于剪辑加章节卡',
-      '在反转或金句前留一句"先别走"或类似拉留率的提示',
-    ],
-    dont_extra: [
-      '不要长段落硬塞知识点，每段 ≤ 4 行',
-      '不要文字游戏（双关只在镜头里有效，文字稿里反而难读）',
-    ],
-    ui_hint: '3000-6000 字 · 口播逐字稿',
   },
   {
     key: 'zhihu',
@@ -172,6 +157,56 @@ export const PLATFORMS: PlatformTrait[] = [
     ui_hint: '700-1200 字 · 口语短文',
   },
   {
+    key: 'bilibili',
+    name: 'B 站长视频文案',
+    tone_tag: '口播',
+    word_range_min: 3000,
+    word_range_max: 6000,
+    voice: '口播逐字稿 · 偏松弛网感 · 强镜头感 · 留弹幕互动钩子',
+    structure: '开场钩 + 章节卡 + 多段拆解 + 反转 / 总结 + 留白下集预告',
+    hook_position: '前 15 秒（约 80 字）必须立钩；每 90-120 秒一个小钩',
+    pacing: '语速 4-5 字/秒；短句为主，长短交错，避免连续两句长句',
+    do_extra: [
+      '逐字稿格式，标点按口播停顿放',
+      '关键转场写成单独一行，便于剪辑加章节卡',
+      '在反转或金句前留一句"先别走"或类似拉留率的提示',
+    ],
+    dont_extra: [
+      '不要长段落硬塞知识点，每段 ≤ 4 行',
+      '不要文字游戏（双关只在镜头里有效，文字稿里反而难读）',
+    ],
+    ui_hint: '3000-6000 字 · 口播逐字稿',
+  },
+  {
+    key: 'custom',
+    name: '自定义',
+    tone_tag: '通用',
+    word_range_min: 1500,
+    word_range_max: 4000,
+    voice: '通用中长篇 · 半正式 · 不偏向任何特定平台',
+    structure: '主标题 + 4-6 个章节 + 升华收尾',
+    hook_position: '开篇 200 字内立钩',
+    pacing: '节奏中等',
+    do_extra: [
+      '保持博主风格主导整体气质',
+      '允许使用作者原本的结构习惯',
+    ],
+    dont_extra: [
+      '不要往任何具体平台风格上强行靠拢',
+    ],
+    ui_hint: '1500-4000 字 · 通用长文',
+  },
+];
+
+/**
+ * 已从 UI 移除但仍允许查询的视频平台 trait。
+ * 老指纹 / 老文章里 platform 字段可能是 'bilibili' | 'douyin' | 'youtube'，
+ * getPlatform 会先在 PLATFORMS 里找，找不到再回退到这里，保留正确语气描述。
+ * 要重新让 UI 显示，把对应对象搬回 PLATFORMS 即可。
+ */
+const HIDDEN_PLATFORMS: PlatformTrait[] = [
+  // bilibili 已经搬回 PLATFORMS，因为 OpenCLI 通道接入后字幕能拿到了
+  {
     key: 'douyin',
     name: '抖音口播',
     tone_tag: '快剪',
@@ -214,35 +249,16 @@ export const PLATFORMS: PlatformTrait[] = [
     ],
     ui_hint: '2500-5500 字 · 视频文案',
   },
-  {
-    key: 'custom',
-    name: '自定义',
-    tone_tag: '通用',
-    word_range_min: 1500,
-    word_range_max: 4000,
-    voice: '通用中长篇 · 半正式 · 不偏向任何特定平台',
-    structure: '主标题 + 4-6 个章节 + 升华收尾',
-    hook_position: '开篇 200 字内立钩',
-    pacing: '节奏中等',
-    do_extra: [
-      '保持博主风格主导整体气质',
-      '允许使用作者原本的结构习惯',
-    ],
-    dont_extra: [
-      '不要往任何具体平台风格上强行靠拢',
-    ],
-    ui_hint: '1500-4000 字 · 通用长文',
-  },
 ];
 
 export function getPlatform(key: string | null | undefined): PlatformTrait {
   const k = (key ?? '').trim();
-  const hit = PLATFORMS.find((p) => p.key === k);
+  const hit = PLATFORMS.find((p) => p.key === k) ?? HIDDEN_PLATFORMS.find((p) => p.key === k);
   return hit ?? PLATFORMS.find((p) => p.key === 'custom')!;
 }
 
 export function isValidPlatformKey(v: string): v is PlatformKey {
-  return PLATFORMS.some((p) => p.key === v);
+  return PLATFORMS.some((p) => p.key === v) || HIDDEN_PLATFORMS.some((p) => p.key === v);
 }
 
 /**

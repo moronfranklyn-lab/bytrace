@@ -23,6 +23,11 @@ import type {
 import { hashUrl } from '../dedupe';
 import { DESKTOP_UA } from '../http';
 import { isApifyEnabled, fetchBilibiliVideo } from '../apify';
+import {
+  runOpenCliJson,
+  OpenCliNotAvailable,
+  OpenCliError,
+} from '../opencli';
 
 /** B 站接口统一 headers：Referer 是关键。 */
 function bilibiliHeaders(extra?: Record<string, string>): Record<string, string> {
@@ -125,6 +130,13 @@ export const adapter: SiteAdapter = {
   matches(url: URL): boolean {
     return /(^|\.)(bilibili\.com|b23\.tv)$/i.test(url.hostname);
   },
+  urlKind(url: URL): 'article' | 'index' | 'unknown' {
+    // 视频详情：/video/BV...
+    if (/^\/video\/BV/i.test(url.pathname)) return 'article';
+    // UP 主主页：space.bilibili.com/<mid>
+    if (/(^|\.)space\.bilibili\.com$/i.test(url.hostname)) return 'index';
+    return 'unknown';
+  },
 
   async crawlArticle(url: URL): Promise<CrawledArticle | CrawlError> {
     const bvid = extractBvid(url);
@@ -154,8 +166,12 @@ async function crawlBilibiliVideo(
   bvid: string,
   url: URL,
 ): Promise<CrawledArticle | CrawlError> {
-  // 优先走 Apify：zhorex/bilibili-scraper 一次调用同时返回元数据 + 字幕
-  // （比 sian.agency 便宜 50×，且不需要 wbi 签名）
+  // Tier 1: OpenCLI bilibili video + subtitle（v2 反爬约束）
+  // 元数据无需登录；字幕需要 Chrome 登录 B 站，没登录就只拿元数据
+  const openCliResult = await crawlBilibiliViaOpenCli(bvid, url);
+  if (openCliResult) return openCliResult;
+
+  // Tier 2: Apify zhorex/bilibili-scraper 兜底
   if (isApifyEnabled()) {
     const videoRes = await fetchBilibiliVideo(bvid);
     if (videoRes) {
@@ -301,6 +317,115 @@ function composeArticleBody(opts: {
     lines.push(opts.note || '（此视频未提供字幕，仅含标题和简介）');
   }
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/**
+ * OpenCLI 通道：bilibili video（元数据，无需登录）+ subtitle（字幕，需登录 B 站）。
+ *
+ * 行为：
+ * - 元数据拿不到（命令挂、daemon 断）→ 返回 null，让 Apify / 原生 API 兜底
+ * - 字幕拿不到（用户没登 B 站或视频无字幕）→ 仅返回元数据，content = 标题+简介
+ *
+ * OpenCLI bilibili video -f json 输出（实测，field/value 两列 table）：
+ *   [{ field: 'bvid', value: '...' }, { field: 'title', value: '...' }, ...]
+ *
+ * OpenCLI bilibili subtitle -f json 输出（待实测格式，按通用约定预期为字幕段数组）。
+ */
+async function crawlBilibiliViaOpenCli(
+  bvid: string,
+  url: URL,
+): Promise<CrawledArticle | null> {
+  let videoFields: { field: string; value: string }[];
+  try {
+    videoFields = await runOpenCliJson<{ field: string; value: string }[]>(
+      ['bilibili', 'video', bvid],
+      { timeoutMs: 60_000 },
+    );
+  } catch (err) {
+    if (err instanceof OpenCliNotAvailable) return null;
+    if (err instanceof OpenCliError) {
+      console.warn('OpenCLI bilibili video 失败：' + err.message.slice(0, 200));
+      return null;
+    }
+    return null;
+  }
+  if (!Array.isArray(videoFields) || videoFields.length === 0) return null;
+
+  const map = new Map(videoFields.map((f) => [f.field, f.value]));
+  const title = map.get('title') || null;
+  const upName = (map.get('author') || '').replace(/\s*\(mid:.*\)/, '').trim();
+  const desc = (map.get('description') || map.get('desc') || '').trim();
+  const pic = map.get('cover') || map.get('pic') || '';
+
+  // Tier 1.5: 尝试字幕
+  let subtitleText = '';
+  let subtitleNote = '';
+  try {
+    const sub = await runOpenCliJson<unknown>(
+      ['bilibili', 'subtitle', bvid],
+      { timeoutMs: 60_000 },
+    );
+    subtitleText = extractSubtitleText(sub);
+    if (!subtitleText) {
+      subtitleNote = '（OpenCLI 返回了字幕响应但解析为空，可能视频本身无字幕）';
+    }
+  } catch (err) {
+    if (err instanceof OpenCliError && err.authRequired) {
+      subtitleNote = '（B 站字幕需要 Chrome 登录 B 站才能拿。仅含标题和简介）';
+    } else {
+      subtitleNote = '（这次没拿到字幕，仅含标题和简介）';
+    }
+  }
+
+  const content = composeArticleBody({
+    title,
+    upName,
+    desc,
+    subtitleText,
+    note: subtitleText ? undefined : subtitleNote,
+  });
+
+  const images: { url: string; alt: string | null }[] = [];
+  if (pic) images.push({ url: pic.startsWith('//') ? 'https:' + pic : pic, alt: title });
+
+  return {
+    url: url.toString(),
+    url_hash: hashUrl(url.toString()),
+    title,
+    content,
+    images,
+    source: 'cheerio',
+    host: url.hostname,
+    medium: 'video',
+  };
+}
+
+/** OpenCLI bilibili subtitle 输出格式比较自由——这里支持几种常见结构。 */
+function extractSubtitleText(raw: unknown): string {
+  if (!raw) return '';
+  // 数组：[{ from, to, content }, ...] 或 [{ text: ... }]
+  if (Array.isArray(raw)) {
+    const lines = raw
+      .map((seg) => {
+        if (typeof seg === 'string') return seg;
+        if (seg && typeof seg === 'object') {
+          const r = seg as Record<string, unknown>;
+          return (r.content ?? r.text ?? r.value ?? '') as string;
+        }
+        return '';
+      })
+      .filter((s) => typeof s === 'string' && s.trim().length > 0);
+    return lines.join('\n').trim();
+  }
+  // 对象：{ subtitle: '...' } 或 { body: [...] }
+  if (typeof raw === 'object') {
+    const r = raw as Record<string, unknown>;
+    if (typeof r.subtitle === 'string') return r.subtitle;
+    if (typeof r.text === 'string') return r.text;
+    if (Array.isArray(r.body)) return extractSubtitleText(r.body);
+    if (Array.isArray(r.subtitles)) return extractSubtitleText(r.subtitles);
+  }
+  return '';
 }
 
 /** 字幕选择优先级：中文 > 自动生成 > 任意第一个。 */

@@ -56,6 +56,12 @@ export interface SiteAdapter {
   crawlArticle(url: URL): Promise<CrawledArticle | CrawlError>;
   /** 抓取作者文章列表（可选）。 */
   crawlAuthorIndex?(url: URL): Promise<CrawledAuthorIndex | CrawlError>;
+  /**
+   * 判断 URL 形态（可选）。返回 'article' = 文章详情页；'index' = 主页/板块页/作者页；
+   * 'unknown' = 形态不明（调用方按各自策略兜底）。
+   * 不实现时调用方会用启发式：含 .html 末尾 / `/post/<num>` / `/p/<num>` 等 → article；否则 index。
+   */
+  urlKind?(url: URL): 'article' | 'index' | 'unknown';
 }
 
 /** CrawlError 类型守卫。 */

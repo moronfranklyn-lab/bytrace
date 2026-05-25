@@ -20,6 +20,14 @@ export const adapter: SiteAdapter = {
   matches(url: URL): boolean {
     return /(^|\.)uisdc\.com$/i.test(url.hostname);
   },
+  urlKind(url: URL): 'article' | 'index' | 'unknown' {
+    // 优设文章 URL 形如 /xxxxxx.html
+    if (/\.html?$/i.test(url.pathname)) return 'article';
+    if (url.pathname === '/' || /^\/(author|tag|category|page)/i.test(url.pathname)) {
+      return 'index';
+    }
+    return 'unknown';
+  },
   async crawlArticle(url: URL): Promise<CrawledArticle | CrawlError> {
     const html = await fetchHtml(url.toString());
     if (typeof html !== 'string') return html;

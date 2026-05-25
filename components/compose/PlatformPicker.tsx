@@ -4,9 +4,11 @@ import { PLATFORMS, type PlatformKey } from '@/lib/platforms';
 
 /**
  * Step 1（最前置）：目标平台选择卡片网格。
- * - 9 张卡：公众号 / B 站 / 知乎 / 少数派 / 优设 / 小红书 / 抖音 / YouTube / 自定义
+ * - 7 张卡：公众号 / 知乎 / 少数派 / 优设 / 小红书 / B 站 / 自定义
  * - 每张卡显示：平台名 + 字数推荐区间 + 节奏标签
  * - 点击即选中；由父组件控制何时进入下一步
+ *
+ * 视频平台（B 站 / 抖音 / YouTube）已从此列表移除，仅保留爬虫与历史数据兼容。
  */
 
 interface PlatformPickerProps {

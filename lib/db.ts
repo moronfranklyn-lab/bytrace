@@ -138,6 +138,213 @@ function ensureStrategyV3Columns(db: Database.Database) {
  * crawled_articles 表由 schema-additions.sql 创建；老库（F0 写时）没有这个字段。
  * 没表就跳过，等 schema-additions.sql 先执行一次 CREATE。
  */
+/**
+ * 博主指纹 ↔ 已用样本的关联表（与 site_articles 同形态）。
+ * - (fingerprint_id, url_hash) 唯一键 → 同一指纹内同一篇文章不会重复入库
+ * - content 直接落表（不依赖 crawled_articles），方便 paste 模式
+ * - iteration 1-based 计数，每次"加样本+重提炼"+1
+ */
+function ensureFingerprintArticlesTable(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS fingerprint_articles (
+      fingerprint_id TEXT NOT NULL,
+      url_hash TEXT NOT NULL,
+      url TEXT,
+      title TEXT,
+      content TEXT NOT NULL,
+      platform TEXT,
+      medium TEXT DEFAULT 'text',
+      domain TEXT,
+      source_mode TEXT NOT NULL DEFAULT 'url',
+      added_at INTEGER NOT NULL,
+      iteration INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (fingerprint_id, url_hash)
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_fp_articles_fp ON fingerprint_articles(fingerprint_id)`);
+}
+
+/**
+ * fingerprint_articles 加分类列（Stage 0 自动标）。
+ * - primary_category : 8 选 1 主类
+ * - secondary_category : 副类，可空
+ * - category_confidence : high/medium/low
+ * 老样本未跑过 Stage 0 → 三列都为 NULL，UI 上会标"未分类"，重提炼时补跑。
+ */
+function ensureFingerprintArticlesCategoryColumns(db: Database.Database) {
+  const cols = db
+    .prepare(`PRAGMA table_info(fingerprint_articles)`)
+    .all() as { name: string }[];
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has('primary_category')) {
+    db.exec(`ALTER TABLE fingerprint_articles ADD COLUMN primary_category TEXT`);
+  }
+  if (!names.has('secondary_category')) {
+    db.exec(`ALTER TABLE fingerprint_articles ADD COLUMN secondary_category TEXT`);
+  }
+  if (!names.has('category_confidence')) {
+    db.exec(`ALTER TABLE fingerprint_articles ADD COLUMN category_confidence TEXT`);
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_fp_articles_primary_cat ON fingerprint_articles(primary_category)`);
+}
+
+/**
+ * 按类别细分的指纹（博主 × 类别 → 一份独立指纹）。
+ * 主指纹 fingerprints 表保留作为"全类别融合视图"，这张表是按类别的细分。
+ * 只有该类别样本 ≥ 3 篇才生成行；样本不够的类别 UI 上提示"再加几篇这类的"。
+ */
+function ensureFingerprintCategoryProfilesTable(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS fingerprint_category_profiles (
+      fingerprint_id TEXT NOT NULL,
+      category TEXT NOT NULL,
+      profile_json TEXT NOT NULL,
+      sample_count INTEGER NOT NULL,
+      iteration INTEGER NOT NULL DEFAULT 1,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (fingerprint_id, category)
+    )
+  `);
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_fp_cat_profiles_cat ON fingerprint_category_profiles(category)`,
+  );
+}
+
+/**
+ * 跨博主可检索的策略碎片索引（写作时按类别 + tag 检索用）。
+ * 每条碎片带"出处"：来自哪个博主、哪份指纹、原始证据片段。
+ * 重写策略：每次 Stage 2 完成后，先 DELETE 该 fingerprint_id 的旧行，再批量插入新行。
+ */
+/**
+ * 风格配方表（v3.2）：用户从 strategy_fragments_indexed 里挑碎片组成"配方"。
+ * 一个配方绑一个 platform_key（必须）+ 可选 site_id。
+ * 写作时按 platform_key 列出可用配方，选了之后碎片注入到 prompt。
+ *
+ * fragment_ids_json: ["fragId1", "fragId2", ...] —— 引用 strategy_fragments_indexed.id
+ */
+function ensureStyleRecipesTable(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS style_recipes (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      platform_key TEXT NOT NULL,
+      site_id TEXT,
+      fragment_ids_json TEXT NOT NULL,
+      notes TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_style_recipes_platform ON style_recipes(platform_key)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_style_recipes_site ON style_recipes(site_id)`);
+}
+
+function ensureStrategyFragmentsIndexedTable(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS strategy_fragments_indexed (
+      id TEXT PRIMARY KEY,
+      fingerprint_id TEXT NOT NULL,
+      author_name TEXT,
+      category TEXT,
+      tag TEXT,
+      title TEXT,
+      description TEXT,
+      example TEXT,
+      when_to_use TEXT,
+      why_works TEXT,
+      platform_scope_json TEXT,
+      domain_scope_json TEXT,
+      created_at INTEGER NOT NULL
+    )
+  `);
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_strat_frag_cat ON strategy_fragments_indexed(category)`,
+  );
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_strat_frag_tag ON strategy_fragments_indexed(tag)`,
+  );
+  db.exec(
+    `CREATE INDEX IF NOT EXISTS idx_strat_frag_fp ON strategy_fragments_indexed(fingerprint_id)`,
+  );
+}
+
+/**
+ * fingerprints 表的迭代计数列。
+ * 每次"加样本+重提炼"自增 1，跟 fingerprint_articles.iteration 关联。
+ */
+function ensureFingerprintIterationColumn(db: Database.Database) {
+  const tbl = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='fingerprints'`)
+    .get();
+  if (!tbl) return;
+  const cols = db.prepare(`PRAGMA table_info(fingerprints)`).all() as { name: string }[];
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has('iteration_count')) {
+    db.exec(`ALTER TABLE fingerprints ADD COLUMN iteration_count INTEGER DEFAULT 1`);
+  }
+}
+
+/**
+ * sites 表的迭代计数列。
+ * 每次"加样本+重提炼"自增 1，方便 site_articles.iteration 关联。
+ */
+function ensureSitesIterationColumn(db: Database.Database) {
+  const tbl = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='sites'`)
+    .get();
+  if (!tbl) return;
+  const cols = db.prepare(`PRAGMA table_info(sites)`).all() as { name: string }[];
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has('iteration_count')) {
+    db.exec(`ALTER TABLE sites ADD COLUMN iteration_count INTEGER DEFAULT 1`);
+  }
+}
+
+/**
+ * 站点画像 ↔ 已用样本的关联表。
+ * 让"加样本"流程知道哪些 url 已经分析过、可以跳过。
+ *
+ * - (site_id, url_hash) 唯一键 → 同 site 内同一 URL 不会被记两遍
+ * - 文章正文存在 crawled_articles（按 url_hash 关联），不在此表重复
+ * - added_at 用来对最新一批样本做"本轮新增了 N 篇"提示
+ * - iteration 是 1-based 计数，每次更新画像 +1，便于看是哪一轮加进来的
+ */
+function ensureSiteArticlesTable(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS site_articles (
+      site_id TEXT NOT NULL,
+      url_hash TEXT NOT NULL,
+      url TEXT NOT NULL,
+      title TEXT,
+      added_at INTEGER NOT NULL,
+      iteration INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (site_id, url_hash)
+    )
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_site_articles_site ON site_articles(site_id)`);
+}
+
+/**
+ * 平台版本差异摘要缓存。
+ * 一次 Claude 对比调用算两段 markdown 的"调整了什么"，结果按
+ * (article_id, from_platform, to_platform) 唯一键缓存。
+ * 老内容变动会让缓存失效——靠 from_hash / to_hash 校验。
+ */
+function ensureArticleDiffsTable(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS article_diffs (
+      article_id TEXT NOT NULL,
+      from_platform TEXT NOT NULL,
+      to_platform TEXT NOT NULL,
+      from_hash TEXT NOT NULL,
+      to_hash TEXT NOT NULL,
+      summary_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (article_id, from_platform, to_platform)
+    )
+  `);
+}
+
 function ensureCrawledArticlesMediumColumn(db: Database.Database) {
   const tbl = db
     .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='crawled_articles'`)
@@ -217,6 +424,25 @@ export function getDb(): Database.Database {
 
   // Agent I · crawled_articles.medium 列扩展（幂等）
   ensureCrawledArticlesMediumColumn(db);
+
+  // 平台版本差异缓存表（幂等）
+  ensureArticleDiffsTable(db);
+
+  // 站点画像 ↔ 已用样本关联表（幂等）
+  ensureSiteArticlesTable(db);
+  ensureSitesIterationColumn(db);
+
+  // 博主指纹 ↔ 已用样本关联表 + 迭代计数列（幂等）
+  ensureFingerprintArticlesTable(db);
+  ensureFingerprintIterationColumn(db);
+
+  // v3.1 · 文章类别 + 按类别细分指纹 + 跨博主碎片索引（幂等）
+  ensureFingerprintArticlesCategoryColumns(db);
+  ensureFingerprintCategoryProfilesTable(db);
+  ensureStrategyFragmentsIndexedTable(db);
+
+  // v3.2 · 风格配方（用户挑碎片组成 platform 专属配方）（幂等）
+  ensureStyleRecipesTable(db);
 
   _db = db;
   return db;

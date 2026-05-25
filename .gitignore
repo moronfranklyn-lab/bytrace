@@ -6,6 +6,10 @@ node_modules/
 out/
 next-env.d.ts
 
+# typescript incremental build cache
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
 # local db
 data/*.db
 data/*.db-journal

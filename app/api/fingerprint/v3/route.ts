@@ -1,6 +1,8 @@
 import { NextRequest } from 'next/server';
 import { nanoid } from 'nanoid';
 import { streamClaude } from '@/lib/claude';
+import { createHash } from 'node:crypto';
+import { crawlArticle, hashUrl, isCrawlError } from '@/lib/crawler';
 import {
   buildFingerprintV3Stage1Prompt,
   type FingerprintV3Article,
@@ -10,6 +12,14 @@ import {
   type FingerprintV3Stage1Output,
 } from '@/lib/prompts/fingerprint-v3-stage2';
 import { buildFingerprintV3CrossPlatformPrompt } from '@/lib/prompts/fingerprint-v3-cross-platform';
+import {
+  buildStage0ClassifyPrompt,
+  parseStage0Output,
+  normalizeCategory,
+  type ArticleCategory,
+} from '@/lib/prompts/fingerprint-v3-stage0';
+import { buildCategoryProfilePrompt } from '@/lib/prompts/fingerprint-v3-category';
+import { pickAvatarChar } from '@/lib/authors/avatar';
 import { getDb } from '@/lib/db';
 
 /**
@@ -28,12 +38,16 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 interface IncomingArticleInput {
+  /** 'url' = 后端用 crawler 抓正文；'paste' = 直接用 content 字段。不传按 paste 兼容老调用 */
+  mode?: 'url' | 'paste';
   title?: string;
   content?: string;
   url?: string;
   platform?: string;
   medium?: 'text' | 'video' | 'mixed';
   domain?: string;
+  /** 可选：UI 上"类别"标签；prompt 暂未使用，仅入库 */
+  category?: string;
 }
 
 interface IncomingPayload {
@@ -42,7 +56,7 @@ interface IncomingPayload {
 }
 
 const MIN_ARTICLES = 2;
-const MAX_ARTICLES = 15;
+const MAX_ARTICLES = 20;
 const MIN_CONTENT_CHARS = 80;
 const STAGE1_CONCURRENCY = 3;
 
@@ -64,19 +78,17 @@ function stripJsonFence(raw: string): string {
   return raw.trim();
 }
 
-function pickAvatarChar(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) return 'A';
-  const cjk = trimmed.match(/[一-鿿]/);
-  if (cjk) return cjk[0];
-  return trimmed.slice(0, 1).toUpperCase();
-}
-
 interface PreparedArticle extends FingerprintV3Article {
   url?: string;
+  primary_category?: ArticleCategory | null;
+  secondary_category?: ArticleCategory | null;
+  category_confidence?: 'high' | 'medium' | 'low' | null;
+  user_specified_category?: boolean;
 }
 
-function prepareArticle(input: IncomingArticleInput, idx: number): PreparedArticle {
+const STAGE0_CONCURRENCY = 4;
+
+async function prepareArticle(input: IncomingArticleInput, idx: number): Promise<PreparedArticle> {
   const platform = (input.platform ?? '').trim();
   if (!platform) {
     throw new Error(`第 ${idx + 1} 篇没指定 platform（公众号 / B 站 / 知乎 / ...）`);
@@ -85,13 +97,48 @@ function prepareArticle(input: IncomingArticleInput, idx: number): PreparedArtic
   if (!['text', 'video', 'mixed'].includes(medium)) {
     throw new Error(`第 ${idx + 1} 篇 medium 取值只能是 text / video / mixed`);
   }
+  const domain = (input.domain ?? '').trim() || '未指定';
+  const userCategory = normalizeCategory(input.category);
+
+  // mode=url：用 crawler 抓正文；其它情况按 paste 兼容
+  if (input.mode === 'url') {
+    const url = (input.url ?? '').trim();
+    if (!url) {
+      throw new Error(`第 ${idx + 1} 篇的 URL 是空的，要么填上要么切到正文模式`);
+    }
+    const crawled = await crawlArticle(url);
+    if (isCrawlError(crawled)) {
+      throw new Error(
+        `第 ${idx + 1} 篇 URL 抓不下来（${crawled.reason}）：${crawled.message}。建议切到正文模式贴一下。`,
+      );
+    }
+    const content = crawled.content.trim();
+    if (content.length < MIN_CONTENT_CHARS) {
+      throw new Error(
+        `第 ${idx + 1} 篇抓到的正文太短（${content.length} 字），可能没抓全。切到正文模式手贴吧。`,
+      );
+    }
+    return {
+      title: crawled.title || input.title?.trim() || undefined,
+      content,
+      url: crawled.url,
+      platform,
+      medium,
+      domain,
+      primary_category: userCategory,
+      secondary_category: null,
+      category_confidence: userCategory ? 'high' : null,
+      user_specified_category: !!userCategory,
+    };
+  }
+
+  // paste 模式
   const content = (input.content ?? '').trim();
   if (content.length < MIN_CONTENT_CHARS) {
     throw new Error(
       `第 ${idx + 1} 篇正文不足 ${MIN_CONTENT_CHARS} 字，再多贴一点`,
     );
   }
-  const domain = (input.domain ?? '').trim() || '未指定';
   return {
     title: (input.title ?? '').trim() || undefined,
     content,
@@ -99,7 +146,60 @@ function prepareArticle(input: IncomingArticleInput, idx: number): PreparedArtic
     platform,
     medium,
     domain,
+    primary_category: userCategory,
+    secondary_category: null,
+    category_confidence: userCategory ? 'high' : null,
+    user_specified_category: !!userCategory,
   };
+}
+
+/**
+ * Stage 0：并发自动分类（user_specified 的跳过）。
+ * 失败不抛错，让该条留 null，UI 上显示"未分类"。
+ */
+async function runStage0Classification(
+  prepared: PreparedArticle[],
+  signal: AbortSignal,
+  onDone: (i: number, primary: ArticleCategory | null) => void,
+): Promise<void> {
+  const queue: number[] = [];
+  for (let i = 0; i < prepared.length; i++) {
+    if (!prepared[i].user_specified_category) queue.push(i);
+  }
+  if (queue.length === 0) return;
+  let cursor = 0;
+
+  async function worker() {
+    while (true) {
+      if (signal.aborted) return;
+      const q = cursor++;
+      if (q >= queue.length) return;
+      const idx = queue[q];
+      try {
+        const prompt = buildStage0ClassifyPrompt({
+          title: prepared[idx].title,
+          content: prepared[idx].content,
+          platform: prepared[idx].platform,
+        });
+        const raw = await streamClaude(prompt, { signal });
+        const cleaned = stripJsonFence(raw);
+        const parsed = parseStage0Output(cleaned);
+        if (parsed) {
+          prepared[idx].primary_category = parsed.primary;
+          prepared[idx].secondary_category = parsed.secondary;
+          prepared[idx].category_confidence = parsed.confidence;
+          onDone(idx, parsed.primary);
+        } else {
+          onDone(idx, null);
+        }
+      } catch {
+        onDone(idx, null);
+      }
+    }
+  }
+
+  const n = Math.min(STAGE0_CONCURRENCY, queue.length);
+  await Promise.all(Array.from({ length: n }, () => worker()));
 }
 
 async function runStage1WithConcurrency(
@@ -198,7 +298,7 @@ export async function POST(req: NextRequest) {
             return;
           }
           try {
-            const p = prepareArticle(articles[i], i);
+            const p = await prepareArticle(articles[i], i);
             prepared.push(p);
             send('article', {
               index: i,
@@ -223,6 +323,28 @@ export async function POST(req: NextRequest) {
         const platformsAnalyzed = Array.from(
           new Set(prepared.map((p) => p.platform).filter(Boolean)),
         );
+
+        // ---- Step 1.5: Stage 0 自动分类（user_specified 跳过）----
+        send('stage', { stage: 'stage0', message: '正在给文章打类别标签' });
+        const t0 = Date.now();
+        try {
+          await runStage0Classification(prepared, abortCtrl.signal, (i, primary) => {
+            send('article', {
+              index: i,
+              status: 'categorized',
+              primary_category: primary,
+              secondary_category: prepared[i].secondary_category ?? null,
+              category_confidence: prepared[i].category_confidence ?? null,
+            });
+          });
+        } catch (err) {
+          // Stage 0 失败不阻塞主流程，但发个 warn
+          send('warn', {
+            phase: 'stage0',
+            message: '自动分类阶段异常：' + ((err as Error).message || '未知错误') + '，继续往下走',
+          });
+        }
+        send('stage', { stage: 'stage0', status: 'done', ms: Date.now() - t0 });
 
         // ---- Step 2: Stage1 ----
         send('stage', {
@@ -272,6 +394,7 @@ export async function POST(req: NextRequest) {
           stage2Raw = await streamClaude(stage2Prompt, {
             signal: abortCtrl.signal,
             onChunk: (text) => send('chunk', { stage: 'stage2', text }),
+            timeoutMs: 480_000,
           });
         } catch (err) {
           send('error', {
@@ -316,6 +439,7 @@ export async function POST(req: NextRequest) {
             const stage3Raw = await streamClaude(stage3Prompt, {
               signal: abortCtrl.signal,
               onChunk: (text) => send('chunk', { stage: 'stage3', text }),
+              timeoutMs: 360_000,
             });
             const stage3Cleaned = stripJsonFence(stage3Raw);
             try {
@@ -348,6 +472,54 @@ export async function POST(req: NextRequest) {
             reason: '只有单平台样本，跳过跨平台对比',
           });
         }
+
+        // ---- Step 4.5: 按类别细分指纹（每类 ≥ 3 篇才跑）----
+        // 按 primary_category 把 stage1Outputs 分组，每组单独再请 Claude 合成一份小指纹。
+        // 单类失败不影响其他类，全失败也不阻塞主流程。
+        send('stage', { stage: 'category-profiles', message: '正在按类别细分指纹' });
+        const t4 = Date.now();
+        const categoryGroups = new Map<ArticleCategory, typeof stage1Outputs>();
+        for (let i = 0; i < prepared.length; i++) {
+          const cat = prepared[i].primary_category;
+          if (!cat) continue;
+          if (i >= stage1Outputs.length) continue;
+          const arr = categoryGroups.get(cat) ?? [];
+          arr.push(stage1Outputs[i]);
+          categoryGroups.set(cat, arr);
+        }
+        const categoryProfiles: Array<{
+          category: ArticleCategory;
+          sample_count: number;
+          profile_json: Record<string, unknown>;
+        }> = [];
+        for (const [category, outputs] of categoryGroups) {
+          if (abortCtrl.signal.aborted) break;
+          if (outputs.length < 3) continue;
+          try {
+            const prompt = buildCategoryProfilePrompt(authorName, category, outputs);
+            const raw = await streamClaude(prompt, {
+              signal: abortCtrl.signal,
+              onChunk: (text) =>
+                send('chunk', { stage: 'category-profile', category, text }),
+              timeoutMs: 360_000,
+            });
+            const cleaned = stripJsonFence(raw);
+            const profile = JSON.parse(cleaned) as Record<string, unknown>;
+            categoryProfiles.push({
+              category,
+              sample_count: outputs.length,
+              profile_json: profile,
+            });
+            send('category-profile-done', { category, sample_count: outputs.length });
+          } catch (err) {
+            send('warn', {
+              phase: 'category-profile',
+              category,
+              message: '类别细分失败：' + ((err as Error).message || '未知错误'),
+            });
+          }
+        }
+        send('stage', { stage: 'category-profiles', status: 'done', ms: Date.now() - t4 });
 
         // ---- Step 5: 落库 ----
         try {
@@ -385,6 +557,31 @@ export async function POST(req: NextRequest) {
                created_at, platform_scope_json, domain_scope_json, why_works, title)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           );
+          // 加样本能力：每篇 prepared article 持久化到 fingerprint_articles
+          // 用于去重 + 累计重提炼。url_hash：URL 模式哈希 URL；paste 模式哈希正文前 200 字。
+          const insertFingerprintArticle = db.prepare(
+            `INSERT OR IGNORE INTO fingerprint_articles
+              (fingerprint_id, url_hash, url, title, content, platform, medium,
+               domain, source_mode, added_at, iteration,
+               primary_category, secondary_category, category_confidence)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+          );
+          const insertCategoryProfile = db.prepare(
+            `INSERT OR REPLACE INTO fingerprint_category_profiles
+              (fingerprint_id, category, profile_json, sample_count, iteration, updated_at)
+             VALUES (?, ?, ?, ?, 1, ?)`,
+          );
+          const insertFragmentIndexed = db.prepare(
+            `INSERT INTO strategy_fragments_indexed
+              (id, fingerprint_id, author_name, category, tag, title, description,
+               example, when_to_use, why_works, platform_scope_json, domain_scope_json,
+               created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          );
+          const sampleHash = (p: { url?: string; content: string }): string => {
+            if (p.url) return hashUrl(p.url);
+            return 'paste:' + createHash('sha1').update(p.content.slice(0, 200)).digest('hex').slice(0, 16);
+          };
 
           const sourceArticlesSummary = prepared.map((p) => ({
             title: p.title,
@@ -448,6 +645,77 @@ export async function POST(req: NextRequest) {
                 (s.title as string) || null,
               );
             }
+            // 写 fingerprint_articles：每篇样本一行（首轮 iteration=1，附 Stage 0 分类）
+            for (const p of prepared) {
+              insertFingerprintArticle.run(
+                fingerprintId,
+                sampleHash(p),
+                p.url ?? null,
+                p.title ?? null,
+                p.content,
+                p.platform,
+                p.medium,
+                p.domain,
+                p.url ? 'url' : 'paste',
+                now,
+                p.primary_category ?? null,
+                p.secondary_category ?? null,
+                p.category_confidence ?? null,
+              );
+            }
+            // 写按类别细分指纹
+            for (const cp of categoryProfiles) {
+              insertCategoryProfile.run(
+                fingerprintId,
+                cp.category,
+                JSON.stringify(cp.profile_json),
+                cp.sample_count,
+                now,
+              );
+              // 该类别下的 category_specific_fragments 也写到跨博主索引表
+              const fragments = Array.isArray(
+                (cp.profile_json as { category_specific_fragments?: unknown[] })
+                  .category_specific_fragments,
+              )
+                ? ((cp.profile_json as { category_specific_fragments: unknown[] })
+                    .category_specific_fragments as Record<string, unknown>[])
+                : [];
+              for (const f of fragments) {
+                insertFragmentIndexed.run(
+                  nanoid(14),
+                  fingerprintId,
+                  authorName,
+                  cp.category,
+                  (f.tag as string) || null,
+                  (f.title as string) || null,
+                  (f.description as string) || null,
+                  (f.example as string) || null,
+                  (f.when_to_use as string) || null,
+                  (f.why_works as string) || null,
+                  JSON.stringify(f.platform_scope ?? []),
+                  JSON.stringify(f.domain_scope ?? []),
+                  now,
+                );
+              }
+            }
+            // 同时把主指纹的全局 strategy_fragments 也写入索引表（category 用主类别 fallback）
+            for (const s of strategyFragments) {
+              insertFragmentIndexed.run(
+                nanoid(14),
+                fingerprintId,
+                authorName,
+                null, // 全局碎片不绑类别
+                (s.tag as string) || null,
+                (s.title as string) || null,
+                (s.description as string) || null,
+                (s.example as string) || null,
+                (s.when_to_use as string) || null,
+                (s.why_works as string) || null,
+                JSON.stringify(s.platform_scope ?? []),
+                JSON.stringify(s.domain_scope ?? []),
+                now,
+              );
+            }
           });
           tx();
 
@@ -457,6 +725,10 @@ export async function POST(req: NextRequest) {
             schema: 'v3',
             article_count: prepared.length,
             platforms_analyzed: platformsAnalyzed,
+            categories_analyzed: categoryProfiles.map((c) => ({
+              category: c.category,
+              sample_count: c.sample_count,
+            })),
             strategy_count: strategyFragments.length,
             timings_ms: {
               stage1: stage1Ms,

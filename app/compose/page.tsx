@@ -15,6 +15,8 @@ import { Toast } from '@/components/compose/Toast';
 import { PlatformPicker } from '@/components/compose/PlatformPicker';
 import { CompositionExplainer } from '@/components/compose/CompositionExplainer';
 import { PLATFORMS as PLATFORM_TRAITS, getPlatform, type PlatformKey } from '@/lib/platforms';
+import { ARTICLE_CATEGORIES, type ArticleCategory } from '@/lib/prompts/fingerprint-v3-stage0';
+import type { Outline, OutlineSection } from '@/lib/prompts/outline';
 
 type LayoutKey = 'standard' | 'lively' | 'minimal';
 type PanelKey = 'platform' | 'layout' | 'image' | 'export' | 'explainer';
@@ -54,18 +56,18 @@ interface SelectedAuthor {
   reason?: string;
 }
 
-interface OutlineSection {
-  index: number;
-  title: string;
-  bullets: string[];
-  word_budget: number;
-}
-interface Outline {
-  working_title: string;
-  hook_idea: string;
-  closing_idea: string;
-  sections: OutlineSection[];
-  total_words_estimate: number;
+interface InspirationFragment {
+  id: string;
+  fingerprint_id: string;
+  author_name: string | null;
+  category: ArticleCategory | null;
+  tag: string | null;
+  title: string | null;
+  description: string | null;
+  example: string | null;
+  when_to_use: string | null;
+  why_works: string | null;
+  platform_scope: string[];
 }
 
 type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7;
@@ -225,8 +227,9 @@ function stripJsonFence(raw: string): string {
 export default function ComposePage() {
   const [step, setStep] = useState<Step>(1);
 
-  // Step 1 · 目标平台
+  // Step 1 · 目标平台 + 具体站点（可选；选了某个站点画像，prompt 会注入它的 profile）
   const [targetPlatform, setTargetPlatform] = useState<PlatformKey | null>(null);
+  const [targetSiteId, setTargetSiteId] = useState<string | null>(null);
 
   // Step 2 · 题材
   const [idea, setIdea] = useState('');
@@ -244,6 +247,15 @@ export default function ComposePage() {
   const [customNotes, setCustomNotes] = useState('');
   /** 用户最终选定的推荐卡片（透传给 Step 7 explainer） */
   const [chosenRecommendation, setChosenRecommendation] = useState<RecommendCard | null>(null);
+
+  // 灵感参考 · 跨博主碎片（类别可选，默认不选 = 全部，不污染 prompt）
+  const [inspirationCategory, setInspirationCategory] = useState<ArticleCategory | null>(null);
+  const [inspirationItems, setInspirationItems] = useState<InspirationFragment[]>([]);
+  const [inspirationLoading, setInspirationLoading] = useState(false);
+  const [inspirationOpen, setInspirationOpen] = useState(true);
+
+  // 风格配方（选了配方 → 把碎片汇成文本注入 customNotes，让下游 prompt 接收到）
+  const [selectedRecipeId, setSelectedRecipeId] = useState<string | null>(null);
 
   // Step 5 — outline
   const [outline, setOutline] = useState<Outline | null>(null);
@@ -285,6 +297,33 @@ export default function ComposePage() {
   useEffect(() => {
     if (targetPlatform) setPreviewPlatform(targetPlatform);
   }, [targetPlatform]);
+
+  // 灵感参考拉取：选了平台后即可拉；类别不选 = 不带 category（全部）
+  useEffect(() => {
+    // 只在 Step 4（微调组合）阶段拉，避免无谓请求
+    if (step !== 4) return;
+    if (!targetPlatform) return;
+    const platformName = getPlatform(targetPlatform).name;
+    const params = new URLSearchParams();
+    if (inspirationCategory) params.set('category', inspirationCategory);
+    params.set('platform', platformName);
+    params.set('limit', '10');
+    const ctrl = new AbortController();
+    setInspirationLoading(true);
+    fetch(`/api/strategies/search?${params.toString()}`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((j: { items?: InspirationFragment[] }) => {
+        setInspirationItems(Array.isArray(j?.items) ? j.items.slice(0, 6) : []);
+        setInspirationLoading(false);
+      })
+      .catch((e: Error) => {
+        if (e.name !== 'AbortError') {
+          setInspirationItems([]);
+          setInspirationLoading(false);
+        }
+      });
+    return () => ctrl.abort();
+  }, [step, targetPlatform, inspirationCategory]);
 
   // ----- Step 1 -> 2 -----
   const goFromPlatformToIdea = useCallback(() => {
@@ -412,7 +451,12 @@ export default function ComposePage() {
       const resp = await fetch('/api/compose/outline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idea, composition, target_platform: targetPlatform ?? undefined }),
+        body: JSON.stringify({
+          idea,
+          composition,
+          target_platform: targetPlatform ?? undefined,
+          target_site_id: targetSiteId ?? undefined,
+        }),
       });
       if (!resp.body) { setOutlineError('响应没有 body'); setOutlineLoading(false); return; }
       const reader = resp.body.getReader();
@@ -469,7 +513,13 @@ export default function ComposePage() {
         method: 'POST',
         signal: ctrl.signal,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idea, composition, outline, target_platform: targetPlatform ?? undefined }),
+        body: JSON.stringify({
+          idea,
+          composition,
+          outline,
+          target_platform: targetPlatform ?? undefined,
+          target_site_id: targetSiteId ?? undefined,
+        }),
       });
       if (!resp.body) { setDraftError('响应没有 body'); setDraftLoading(false); return; }
       const reader = resp.body.getReader();
@@ -616,7 +666,11 @@ export default function ComposePage() {
         {step === 1 && (
           <Step1Platform
             value={targetPlatform}
-            onChange={setTargetPlatform}
+            siteId={targetSiteId}
+            onChange={(k, sid) => {
+              setTargetPlatform(k);
+              setTargetSiteId(sid ?? null);
+            }}
             onNext={goFromPlatformToIdea}
           />
         )}
@@ -651,6 +705,28 @@ export default function ComposePage() {
         )}
 
         {step === 4 && (
+          <RecipePickerPanel
+            platformKey={targetPlatform}
+            selectedRecipeId={selectedRecipeId}
+            onSelect={(recipeId, recipeNotes) => {
+              setSelectedRecipeId(recipeId);
+              if (recipeNotes !== null) {
+                setCustomNotes((prev) => {
+                  // 把配方块追加到现有备注里，用分隔线区分
+                  const stripped = prev.replace(/\n*---\n# 风格配方 ·[\s\S]*$/, '').trim();
+                  return stripped ? `${stripped}\n\n---\n${recipeNotes}` : recipeNotes;
+                });
+              } else {
+                // 取消选择：清掉之前注入的块
+                setCustomNotes((prev) =>
+                  prev.replace(/\n*---\n# 风格配方 ·[\s\S]*$/, '').trim(),
+                );
+              }
+            }}
+          />
+        )}
+
+        {step === 4 && (
           <Step4Tune
             authors={authors}
             setAuthors={setAuthors}
@@ -658,6 +734,18 @@ export default function ComposePage() {
             setCustomNotes={setCustomNotes}
             onBack={() => setStep(3)}
             onNext={goOutline}
+          />
+        )}
+
+        {step === 4 && (
+          <InspirationPanel
+            category={inspirationCategory}
+            onCategoryChange={setInspirationCategory}
+            platform={targetPlatform}
+            items={inspirationItems}
+            loading={inspirationLoading}
+            open={inspirationOpen}
+            onToggle={() => setInspirationOpen((v) => !v)}
           />
         )}
 
@@ -748,24 +836,140 @@ function Stepper({ current, onJump }: { current: Step; onJump: (s: Step) => void
   );
 }
 
-// ---------- Step 1 · 选目标平台 ----------
+// ---------- Step 1 · 选目标平台（实例化为「站点画像 卡片 + 通用画像 卡片」混排）----------
+interface SitePickerItem {
+  kind: 'site' | 'generic';
+  platform_key: PlatformKey;
+  site_id?: string;
+  site_name?: string;
+  section?: string | null;
+  sample_count?: number;
+  title?: string;
+  word_range_min: number | null;
+  word_range_max: number | null;
+  tone_hint?: string | null;
+  tone_tag?: string;
+  pacing?: string;
+  ui_hint?: string;
+  preferred_topics?: string[];
+}
+
 function Step1Platform({
-  value, onChange, onNext,
+  value, siteId, onChange, onNext,
 }: {
   value: PlatformKey | null;
-  onChange: (k: PlatformKey) => void;
+  siteId: string | null;
+  onChange: (k: PlatformKey, sid?: string | null) => void;
   onNext: () => void;
 }) {
+  const [items, setItems] = useState<SitePickerItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    fetch('/api/sites/picker')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d: { items: SitePickerItem[] }) => {
+        setItems(d.items ?? []);
+        setError(null);
+      })
+      .catch((e) => setError((e as Error).message))
+      .finally(() => setLoading(false));
+  }, []);
+
   const picked = value ? getPlatform(value) : null;
+  const pickedItem = items.find((it) =>
+    siteId ? it.kind === 'site' && it.site_id === siteId : it.kind === 'generic' && it.platform_key === value,
+  );
+
   return (
     <section className="step-card">
       <p className="step-card-eyebrow">STEP 01 · TARGET PLATFORM</p>
       <h1 className="step-card-title">这篇要发到哪儿？</h1>
       <p className="step-card-sub">
-        平台不同，篇幅、节奏、钩子位置都不一样。先选一个，后面推荐风格、写大纲、写正文都会按这个平台来调。
+        每张「站点画像」卡都是你拆过的具体板块——选了它，写大纲和正文就会按这个板块的篇幅、调性、开篇套路来调。没拆过的平台用通用画像兜底。
+        <a
+          href="/sites/new"
+          style={{ marginLeft: 8, color: 'var(--accent)', textDecoration: 'underline' }}
+        >
+          + 去拆一个新板块
+        </a>
       </p>
-      <PlatformPicker value={value} onChange={onChange} onConfirm={onNext} />
-      {picked && (
+
+      {loading && <div style={{ opacity: 0.6, padding: 16 }}>加载站点画像…</div>}
+      {error && (
+        <div style={{ color: 'var(--danger, #c0392b)' }}>拉取失败：{error}</div>
+      )}
+
+      {!loading && items.length > 0 && (
+        <div className="platform-picker-grid">
+          {items.map((it) => {
+            const active = it.kind === 'site'
+              ? it.site_id === siteId
+              : it.platform_key === value && !siteId;
+            return (
+              <button
+                key={it.kind === 'site' ? `site-${it.site_id}` : `generic-${it.platform_key}`}
+                type="button"
+                className={'platform-picker-card' + (active ? ' active' : '')}
+                onClick={() => onChange(it.platform_key, it.site_id ?? null)}
+                onDoubleClick={() => {
+                  onChange(it.platform_key, it.site_id ?? null);
+                  onNext();
+                }}
+              >
+                <div className="platform-picker-card-head">
+                  <span className="platform-picker-name">
+                    {it.kind === 'site' ? it.site_name : it.title}
+                  </span>
+                  <span className="platform-picker-tag">
+                    {it.kind === 'site' ? `${it.sample_count} 篇样本` : it.tone_tag}
+                  </span>
+                </div>
+                {it.kind === 'site' && it.section && (
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--text-muted)',
+                      marginBottom: 6,
+                    }}
+                  >
+                    {it.section}
+                  </div>
+                )}
+                {it.word_range_min && it.word_range_max && (
+                  <div className="platform-picker-range">
+                    {it.word_range_min.toLocaleString()}–{it.word_range_max.toLocaleString()} 字
+                  </div>
+                )}
+                {it.kind === 'site' ? (
+                  <>
+                    {it.tone_hint && (
+                      <div className="platform-picker-pacing">{it.tone_hint}…</div>
+                    )}
+                    {it.preferred_topics && it.preferred_topics.length > 0 && (
+                      <div
+                        className="platform-picker-hint"
+                        style={{ fontSize: 11, opacity: 0.7 }}
+                      >
+                        常写：{it.preferred_topics.slice(0, 2).join(' / ')}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div className="platform-picker-pacing">{it.pacing}</div>
+                    <div className="platform-picker-hint">{it.ui_hint}</div>
+                  </>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {pickedItem && (
         <div style={{
           background: 'var(--surface-light)',
           border: '1px solid var(--border)',
@@ -774,11 +978,20 @@ function Step1Platform({
           fontSize: 12,
           color: 'var(--text-secondary)',
           lineHeight: 1.7,
+          marginTop: 12,
         }}>
-          <strong style={{ color: 'var(--text)', fontFamily: 'var(--font-display)', fontWeight: 500 }}>已选「{picked.name}」</strong>
-          ：建议 {picked.word_range_min.toLocaleString()}–{picked.word_range_max.toLocaleString()} 字 · {picked.voice}。
+          <strong style={{ color: 'var(--text)', fontFamily: 'var(--font-display)', fontWeight: 500 }}>
+            已选「{pickedItem.kind === 'site' ? pickedItem.site_name : pickedItem.title}」
+            {pickedItem.kind === 'site' && pickedItem.section ? ` · ${pickedItem.section}` : ''}
+          </strong>
+          {picked && (
+            <>
+              ：基础平台「{picked.name}」 · 建议 {pickedItem.word_range_min?.toLocaleString()}–{pickedItem.word_range_max?.toLocaleString()} 字 · {picked.voice}
+            </>
+          )}
         </div>
       )}
+
       <div className="step-actions">
         <div className="step-actions-left" />
         <div className="step-actions-right">
@@ -1038,6 +1251,23 @@ function Step4Tune({
 }
 
 // ---------- Step 5 · 生成大纲 ----------
+const STRUCTURE_SHAPE_LABEL: Record<NonNullable<Outline['structure_shape']>, string> = {
+  causal_chain: '因果链',
+  dual_contrast: '双线对比',
+  concentric: '同心圆',
+  flat_list: '平铺列举',
+  timeline: '时间轴',
+  problem_solution: '问题→方案',
+};
+
+const DEPTH_ROLE_LABEL: Record<NonNullable<OutlineSection['depth_role']>, string> = {
+  open: '开篇',
+  deeper: '挖深一层',
+  parallel: '并列补充',
+  turn: '反转',
+  close: '收尾',
+};
+
 function Step5Outline({
   loading, outline, setOutline, stream, streamRef, error, onBack, onRetry, onNext,
 }: {
@@ -1081,6 +1311,27 @@ function Step5Outline({
 
       {!loading && outline && (
         <div className="outline-editor">
+          {(outline.structure_shape || outline.core_thesis) && (
+            <div style={{ marginBottom: 12 }}>
+              {outline.structure_shape && (
+                <span className="tag" style={{ marginRight: 8 }}>
+                  {STRUCTURE_SHAPE_LABEL[outline.structure_shape]}
+                </span>
+              )}
+              {outline.core_thesis && (
+                <blockquote style={{
+                  margin: '8px 0 0',
+                  padding: '6px 12px',
+                  borderLeft: '3px solid var(--accent, #999)',
+                  fontSize: 13,
+                  color: 'var(--text-muted)',
+                  fontStyle: 'italic',
+                }}>
+                  {outline.core_thesis}
+                </blockquote>
+              )}
+            </div>
+          )}
           <div className="outline-meta">
             <div className="outline-meta-field">
               <label>工作标题</label>
@@ -1132,6 +1383,11 @@ function Step5Outline({
                     setOutline(next);
                   }}
                 />
+                {s.depth_role && (
+                  <span className="tag" style={{ marginLeft: 6, fontSize: 11 }}>
+                    {DEPTH_ROLE_LABEL[s.depth_role]}
+                  </span>
+                )}
                 <input
                   className="outline-section-budget"
                   type="number"
@@ -1144,6 +1400,16 @@ function Step5Outline({
                   }}
                 />
               </div>
+              {s.thesis && (
+                <p style={{
+                  margin: '4px 0 6px 32px',
+                  fontSize: 12,
+                  fontStyle: 'italic',
+                  color: 'var(--text-muted)',
+                }}>
+                  {s.thesis}
+                </p>
+              )}
               <ul className="outline-bullet-list">
                 {s.bullets.map((b, j) => (
                   <li key={j} className="outline-bullet">{b}</li>
@@ -1247,10 +1513,14 @@ function Step6Draft({
         </aside>
         <div className="draft-stream" ref={scrollRef}>
           {draftMd ? (
-            <pre className="draft-stream-pre">
-              {draftMd}
-              {loading && <span className="cursor-blink" />}
-            </pre>
+            <article
+              className="article draft-stream-md"
+              dangerouslySetInnerHTML={{
+                __html:
+                  renderMarkdown(draftMd) +
+                  (loading ? '<span class="cursor-blink"></span>' : ''),
+              }}
+            />
           ) : (
             <pre className="draft-stream-pre" style={{ color: 'var(--text-muted)' }}>
               {loading ? '正在等待第一段…' : '点上面的"重新生成"开始'}
@@ -1443,6 +1713,122 @@ function MatchBadge({ q }: { q: 'exact' | 'cross-platform' | 'generic' }) {
   return <span className={`match-badge ${cls}`}>{label}</span>;
 }
 
+// ---------- 灵感参考 · 跨博主碎片（轻量内联，不入 prompt） ----------
+function InspirationPanel({
+  category, onCategoryChange, platform, items, loading, open, onToggle,
+}: {
+  category: ArticleCategory | null;
+  onCategoryChange: (c: ArticleCategory | null) => void;
+  platform: PlatformKey | null;
+  items: InspirationFragment[];
+  loading: boolean;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const platformName = platform ? getPlatform(platform).name : null;
+  return (
+    <section
+      className="step-card"
+      style={{ background: 'var(--surface)', padding: '20px 24px', gap: 12 }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <div>
+          <p className="step-card-eyebrow" style={{ marginBottom: 4 }}>INSPIRATION · 灵感参考</p>
+          <p style={{ fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 500, color: 'var(--text)', margin: 0 }}>
+            我要写哪一类？{platformName && (
+              <span style={{ marginLeft: 8, fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', letterSpacing: '0.05em' }}>
+                {platformName} · 只看参考、不进 prompt
+              </span>
+            )}
+          </p>
+        </div>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={onToggle}
+          style={{ fontSize: 12 }}
+        >
+          {open ? '收起' : '展开'}
+        </button>
+      </div>
+
+      {open && (
+        <>
+          <div className="idea-chips" style={{ gap: 8 }}>
+            <button
+              type="button"
+              className="idea-chip"
+              onClick={() => onCategoryChange(null)}
+              style={category === null ? {
+                background: 'var(--surface-white)',
+                color: 'var(--text)',
+                borderColor: 'var(--border-medium)',
+              } : undefined}
+            >
+              全部 · 跳过
+            </button>
+            {ARTICLE_CATEGORIES.map((c) => (
+              <button
+                key={c}
+                type="button"
+                className="idea-chip"
+                onClick={() => onCategoryChange(c)}
+                style={category === c ? {
+                  background: 'var(--surface-white)',
+                  color: 'var(--text)',
+                  borderColor: 'var(--border-medium)',
+                } : undefined}
+              >
+                {c}
+              </button>
+            ))}
+          </div>
+
+          {loading && (
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '4px 0 0' }}>
+              正在召回跨博主碎片…
+            </p>
+          )}
+
+          {!loading && items.length === 0 && (
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '4px 0 0' }}>
+              这一类在指纹库里还没有可参考的碎片。{category ? '试试切到「全部」。' : '先去拆几位博主吧。'}
+            </p>
+          )}
+
+          {!loading && items.length > 0 && (
+            <div className="strategies-grid">
+              {items.map((it) => (
+                <div key={it.id} className="strategy-card">
+                  <div className="strategy-card-head">
+                    {it.author_name && <span className="tag">{it.author_name}</span>}
+                    {it.tag && <span className="tag tag-lang">{it.tag}</span>}
+                    {it.category && <span className="tag">{it.category}</span>}
+                  </div>
+                  {it.title && (
+                    <div className="strategy-card-desc" style={{ fontWeight: 500 }}>
+                      {it.title}
+                    </div>
+                  )}
+                  {it.description && (
+                    <div className="strategy-card-desc">{it.description}</div>
+                  )}
+                  {it.example && (
+                    <div className="strategy-card-example">「{it.example}」</div>
+                  )}
+                  {it.when_to_use && (
+                    <div className="strategy-card-when">何时用：{it.when_to_use}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 // ---------- 共用 Banner ----------
 function Banner({ kind, title, children }: { kind: 'info' | 'loading' | 'error'; title: string; children: ReactNode }) {
   let bg = 'var(--surface)';
@@ -1490,4 +1876,154 @@ async function fetchFingerprintNames(ids: string[]): Promise<Record<string, { au
   const out: Record<string, { author_name: string; platform: string | null }> = {};
   for (const id of ids) out[id] = { author_name: `指纹 ${id.slice(0, 6)}`, platform: null };
   return out;
+}
+
+// ---------- 风格配方挑选面板（Step 4 上方）----------
+interface RecipeSummary {
+  id: string;
+  name: string;
+  platform_key: string;
+  fragment_ids: string[];
+  notes: string | null;
+}
+
+interface RecipeDetail {
+  id: string;
+  name: string;
+  platform_key: string;
+  notes: string | null;
+  fragments: Array<{
+    id: string;
+    author_name: string | null;
+    tag: string | null;
+    title: string | null;
+    description: string | null;
+    example: string | null;
+    when_to_use: string | null;
+    why_works: string | null;
+  }>;
+}
+
+/**
+ * 把配方碎片转成一段可读的 prompt 注入文本。
+ * 调用方把这段塞进 customNotes，下游 outline / draft prompt 已经会把 customNotes 喂给模型。
+ */
+function recipeToNotes(detail: RecipeDetail): string {
+  const lines: string[] = [`# 风格配方 · ${detail.name}`];
+  if (detail.notes) lines.push(`备注：${detail.notes}`);
+  lines.push('');
+  lines.push('参考下面这些策略碎片来写（按出现顺序优先级递减）：');
+  for (const f of detail.fragments) {
+    const head = [f.title ?? f.tag ?? '碎片', f.author_name ? `（来自 ${f.author_name}）` : '']
+      .join('');
+    lines.push(`- ${head}`);
+    if (f.description) lines.push(`  - ${f.description}`);
+    if (f.example) lines.push(`  - 例：「${f.example}」`);
+    if (f.when_to_use) lines.push(`  - 适用：${f.when_to_use}`);
+  }
+  return lines.join('\n');
+}
+
+function RecipePickerPanel({
+  platformKey,
+  selectedRecipeId,
+  onSelect,
+}: {
+  platformKey: PlatformKey | null;
+  selectedRecipeId: string | null;
+  onSelect: (recipeId: string | null, notes: string | null) => void;
+}) {
+  const [recipes, setRecipes] = useState<RecipeSummary[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!platformKey) return;
+    setLoading(true);
+    fetch(`/api/recipes?platform=${encodeURIComponent(platformKey)}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d: { items: RecipeSummary[] }) => setRecipes(d.items ?? []))
+      .catch(() => setRecipes([]))
+      .finally(() => setLoading(false));
+  }, [platformKey]);
+
+  const pick = async (recipeId: string) => {
+    if (selectedRecipeId === recipeId) {
+      // 再点一次 = 取消
+      onSelect(null, null);
+      return;
+    }
+    // 拉详情拿 fragments
+    const r = await fetch(`/api/recipes/${recipeId}`);
+    if (!r.ok) return;
+    const d = (await r.json()) as { recipe: RecipeDetail };
+    onSelect(recipeId, recipeToNotes(d.recipe));
+  };
+
+  return (
+    <section
+      className="step-card"
+      style={{ background: 'var(--surface)', padding: '20px 24px', gap: 12 }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <p className="step-card-eyebrow" style={{ marginBottom: 4 }}>RECIPE · 风格配方</p>
+          <p style={{
+            fontFamily: 'var(--font-display)',
+            fontSize: 16,
+            fontWeight: 500,
+            color: 'var(--text)',
+            margin: 0,
+          }}>
+            用现成配方？
+            <span style={{
+              marginLeft: 8,
+              fontSize: 12,
+              color: 'var(--text-muted)',
+              fontFamily: 'var(--font-mono)',
+              letterSpacing: '0.05em',
+            }}>
+              选了之后会把碎片自动写进下方备注，再点一次取消
+            </span>
+          </p>
+        </div>
+        <a href="/recipes" className="btn btn-ghost" style={{ fontSize: 12 }}>
+          管理配方 →
+        </a>
+      </div>
+
+      {loading && <div style={{ opacity: 0.6, fontSize: 12 }}>加载…</div>}
+      {!loading && recipes.length === 0 && (
+        <div style={{ opacity: 0.65, fontSize: 12 }}>
+          这个平台还没有配方。<a href="/recipes" style={{ color: 'var(--accent)' }}>去 /recipes 建一份</a>，或者跳过这步直接用下方"指纹微调"。
+        </div>
+      )}
+      {!loading && recipes.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {recipes.map((r) => {
+            const active = r.id === selectedRecipeId;
+            return (
+              <button
+                key={r.id}
+                type="button"
+                className={'idea-chip' + (active ? ' active' : '')}
+                onClick={() => void pick(r.id)}
+                title={r.notes ?? `${r.fragment_ids.length} 个碎片`}
+                style={
+                  active
+                    ? {
+                        background: 'var(--surface-white)',
+                        color: 'var(--text)',
+                        borderColor: 'var(--border-medium)',
+                      }
+                    : undefined
+                }
+              >
+                {r.name} · {r.fragment_ids.length} 片
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
 }

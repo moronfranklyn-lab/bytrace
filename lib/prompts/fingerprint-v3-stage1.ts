@@ -47,6 +47,11 @@ export function buildFingerprintV3Stage1Prompt(
 2. 每条碎片要具体、能落地——必须给出原文里能佐证的例子（≤ 40 字摘抄）。
 3. 重点：你要意识到这篇是写给「${platform}」「${domain}」的，作者在这一篇里**为了适配这个平台和这个领域**，做了哪些**独特调整**？把这部分单独写在 platform_adjustments 和 domain_adjustments。
 4. 给一段 ≤ 60 字的「局部观察」，描述这篇的整体调性、节奏、情绪。
+5. **判断这一篇的论证形态与深度**——这是生成时仿写最关键的骨架信息：
+   - structure_shape：这一篇属于哪种形态？causal_chain（因果链，一个核心论点层层挖根）/ dual_contrast（双线对比，"你以为 X，其实 Y"反复缠绕）/ concentric（同心圆，现象→公司→个人逐圈收紧）/ flat_list（平铺列举，N 个并列要点）/ timeline（时间轴）/ problem_solution（问题方案）。挑最贴近的一个。
+   - depth_layers：这一篇围绕**核心论点**挖了几层？1 层 = 抛论点就走；2-3 层 = 挖到"为什么会这样"；4+ 层 = 从现象一路扒到底层机制。给整数。
+   - depth_chain：把这一篇的因果链/递进路径用 3-6 个短句串出来，比如「现象 X → 不是 A，是 B → B 的根源是 C → 所以应对 D」。让下游能直接看出"作者怎么挖"。
+6. **抓「物件级类比」**——这是仿写最容易丢失的特征。物件级 = 真实可触摸的物件 / 场景 / 人物，比如「中年人体检报告」「黄牛在天台抽烟」「户口本进 iCloud」。抽象的「就像一场旅程」「如同登山」不算。把这篇里所有物件级类比原文摘出来放进 concrete_analogies 数组（≤ 40 字/条，最多 6 条；没有就给空数组，**不要硬凑**）。
 
 严格输出规则（违反任何一条都视为失败）：
 - 只输出一个 \`\`\`json ... \`\`\` 代码块，前后不要任何文字、寒暄、解释。
@@ -88,7 +93,17 @@ export function buildFingerprintV3Stage1Prompt(
   "structure_observation": {
     "opening_hook": "这篇怎么开篇的，一句话",
     "closing_pattern": "这篇怎么收尾的，一句话"
-  }
+  },
+  "structure_shape": "causal_chain / dual_contrast / concentric / flat_list / timeline / problem_solution 之一",
+  "depth_layers": 3,
+  "depth_chain": [
+    "用 3-6 个短句把核心论点的递进路径写出来",
+    "例：现象 X → 不是 A，是 B → 根源 C → 应对 D"
+  ],
+  "concrete_analogies": [
+    "原文摘抄的物件级类比 1，用「」包裹，≤ 40 字",
+    "原文摘抄的物件级类比 2"
+  ]
 }
 \`\`\`
 

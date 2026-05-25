@@ -20,8 +20,8 @@ export function buildSiteProfilePrompt(
   if (!Array.isArray(articles) || articles.length === 0) {
     throw new Error('buildSiteProfilePrompt: articles must be a non-empty array');
   }
-  if (articles.length > 10) {
-    throw new Error('buildSiteProfilePrompt: at most 10 articles supported');
+  if (articles.length > 20) {
+    throw new Error('buildSiteProfilePrompt: at most 20 articles supported');
   }
 
   const articleBlocks = articles
@@ -54,13 +54,17 @@ export function buildSiteProfilePrompt(
 3. 单篇里的偶发现象不算画像，跨篇复现的才算。
 4. 这份画像未来会被用来"按板块调字数、调标题、调引导语"——所以字数区间、标题模板、开篇套路要尽量具体可复用。
 5. 严禁空话（"内容优质""文笔流畅"这种描述零信息）。每个字段都要给到能直接落地的细节。
+6. **重点判断这个板块的「论证形态偏好」**——这关系到生成时是按因果链层层挖、还是平铺列举、还是双线对比。需要观察：
+   - 爆款文章是围绕**一个**核心论点反复深挖（因果链 / 同心圆）？还是平行铺开**多个**论点（平铺列举 / 时间轴）？
+   - 单个论点平均会"挖到第几层"？比如「现象→原因→更深原因→应对」是 4 层；「现象→举例→另一个例」只算 1 层。
+   - 每千字大约出现几个**物件级的具体类比**（拿生活里的真实物件、场景、人物做比喻，比如「就像中年人体检报告」「黄牛在天台抽烟」），不算抽象隐喻（比如「就像一场旅程」这种不算物件级）。
 
 严格输出规则（违反任何一条都视为失败）：
 - 只输出一个 \`\`\`json ... \`\`\` 代码块，前后不要有任何文字、解释、寒暄。
 - JSON 必须是合法 JSON，所有字符串字段使用半角双引号 ASCII " 包裹。
 - **JSON 字符串值内部**严禁出现裸的半角双引号 "。需要表达「引用」「例如」时，**必须用中文全角引号「」**，不要用 ASCII "..."、也不要用 \\" 转义（容易漏）。下游会直接 JSON.parse，任何不合法的引号都会导致失败。
 - 严禁在 JSON 字段值里使用 emoji 或装饰符号。
-- 数组字段必须给满规定数量（preferred_topics 给 3-5 个；title_patterns 给 3-5 个；key_phrases 给 5-8 个）。
+- 数组字段必须给满规定数量（preferred_topics 给 3-5 个；title_patterns 给 3-5 个；key_phrases 给 5-8 个；preferred_structures 给 1-3 个，按出现频次降序）。
 - word_count_range 是 [min, max] 的两元素整数数组，反映这一批文章实际的字数分布（粗略估计即可）。
 - 字段顺序与 schema 一致，便于下游解析。
 
@@ -82,7 +86,16 @@ export function buildSiteProfilePrompt(
   "opening_pattern": "开篇典型套路（场景代入 / 痛点抛出 / 个人体验 / 数据反差 等），附一句话样例描述",
   "closing_pattern": "收尾典型套路（总结 + 行动建议 / 局限说明 / 反问留白 等），附一句话样例描述",
   "tone": "整体基调描述，比如「理性、克制、工具感」「温暖、个人化、有故事感」等",
-  "key_phrases": ["高频词或固定短语 1", "高频词或固定短语 2", "..."]
+  "key_phrases": ["高频词或固定短语 1", "高频词或固定短语 2", "..."],
+  "preferred_structures": [
+    {
+      "shape": "causal_chain / dual_contrast / concentric / flat_list / timeline / problem_solution",
+      "share": "高 / 中 / 低（这种形态在本站点爆款里占比）",
+      "example_title": "这篇文章里走这种形态的标题之一"
+    }
+  ],
+  "preferred_depth": "shallow（1 层，举例就走，不挖根）/ medium（2-3 层，挖到「为什么会这样」）/ deep（4+ 层，从现象一路扒到底层机制）。附一句样例：从「X 现象」一路挖到「Y 底层逻辑」",
+  "analogy_density": "high（每 500 字一个物件级类比）/ medium（每 1000 字一个）/ low（每 2000 字一个）/ rare（几乎不用具体物件类比，多用抽象隐喻）。说明：物件级 = 真实可触摸的物件 / 场景 / 人物，比如「中年人体检报告」「黄牛在天台抽烟」「户口本进 iCloud」"
 }
 \`\`\`
 

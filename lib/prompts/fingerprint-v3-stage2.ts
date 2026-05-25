@@ -56,13 +56,16 @@ export function buildFingerprintV3Stage2Prompt(
 3. 提炼策略碎片库（strategy_fragments）：合并 stage1 里相似的碎片，去重，每条标注适用平台与适用领域。**全库 15-25 条**，覆盖 opening / transition / closing / argument / language / visual / pacing / hook 多个 tag。
 4. cross_platform_report 给一个初稿（summary + 1-3 个 comparisons + 2-4 个 transferable_patterns）。stage3 会基于这份初稿继续做深度对比。如果 platforms_analyzed 只有一个，cross_platform_report.summary 写「单平台样本，无跨平台对比」、comparisons 为空数组、transferable_patterns 给 2 条「平台内可复用的模式」。
 5. user_facing_summary 给一段 100-180 字的人话，说明这位博主有几套写作「配方」，分别在什么场景用。这段会直接展示给写文章的用户。
+6. **structure_repertoire（结构能力库）**：统计 stage1 里每篇的 structure_shape，按出现频次降序汇总。这决定生成时博主"擅长走哪种骨架"，是仿写最关键的字段之一。同时给出 dominant_shape（最常用的那种）+ 该博主在每种形态下的执行特征（例如「causal_chain 时，每挖一层会先抛'你拆开看'再拼论据」）。
+7. **depth_pattern（论证深度模式）**：合并 stage1 里所有 depth_chain，提炼出博主**平均挖到第几层**、最深可到第几层、挖根时**惯用的衔接句式**（例如「不是 X，是 Y」「你拆开看」「这事不复杂」）。
+8. **analogy_bank（物件类比库）**：把 stage1 里所有 concrete_analogies 汇总去重，保留 8-15 条最有代表性的物件级类比原文摘抄。这一库是生成时最贵的资产——下游会优先复用这些"具体物件"做新的类比。**严禁**收抽象隐喻（"如同登山" / "就像一场旅程"这种不算）。
 
 严格输出规则（违反任何一条都视为失败）：
 - 只输出一个 \`\`\`json ... \`\`\` 代码块，前后不要任何文字。
 - JSON 必须合法，字符串字段用双引号。
 - **严禁** emoji 或装饰符号（✦ ✨ ✓ ● ◆ 🎯 等都禁用），唯一例外是 visual.emoji_usage 字段（统计用途）。
 - 嵌套引号统一用「」中文引号，避免破坏 JSON.parse。
-- 数组下限：strategy_fragments ≥ 15，每个平台的 platform_specific_traits ≥ 2、strengths ≥ 2、weaknesses ≥ 2。
+- 数组下限：strategy_fragments ≥ 15，每个平台的 platform_specific_traits ≥ 2、strengths ≥ 2、weaknesses ≥ 2、structure_repertoire.shapes ≥ 1、depth_pattern.drilling_phrases ≥ 2、analogy_bank ≥ 0（**没有就给空数组，禁止硬凑**）。
 - 字段顺序与 schema 一致，便于下游解析。
 
 输出 JSON Schema：
@@ -144,7 +147,31 @@ export function buildFingerprintV3Stage2Prompt(
     }
   ],
 
-  "user_facing_summary": "给写文章的用户看的一段话（100-180 字）：这位博主有几套写作配方，分别在什么场景用，怎么挑。"
+  "user_facing_summary": "给写文章的用户看的一段话（100-180 字）：这位博主有几套写作配方，分别在什么场景用，怎么挑。",
+
+  "structure_repertoire": {
+    "dominant_shape": "causal_chain / dual_contrast / concentric / flat_list / timeline / problem_solution 之一",
+    "shapes": [
+      {
+        "shape": "causal_chain",
+        "share": "高 / 中 / 低",
+        "execution_traits": ["这种形态下他的招数 1（比如「每挖一层前先抛'你拆开看'」）", "招数 2"]
+      }
+    ]
+  },
+
+  "depth_pattern": {
+    "average_layers": 3,
+    "max_layers": 5,
+    "drilling_phrases": ["挖根时的衔接句式 1（比如「不是 X，是 Y」）", "句式 2", "句式 3"],
+    "drilling_observation": "一句话描述他挖根的整体习惯：是先抛反问再给答案？还是先抛结论再拆？"
+  },
+
+  "analogy_bank": [
+    "原文摘抄的物件级类比 1（≤ 40 字，用「」包裹）",
+    "类比 2",
+    "..."
+  ]
 }
 \`\`\`
 

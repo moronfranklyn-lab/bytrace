@@ -24,6 +24,15 @@ interface IncomingPayload {
   title?: string;
   /** 目标平台（v3 新增）。空则走通用 wechat */
   target_platform?: string;
+  /** v3.3：目标站点画像 id；传了就把站点画像注入 article prompt */
+  target_site_id?: string;
+}
+
+interface SiteProfileRow {
+  id: string;
+  site_name: string;
+  section: string | null;
+  profile_json: string;
 }
 
 const MIN_IDEA_CHARS = 30;
@@ -157,10 +166,12 @@ export async function POST(req: NextRequest) {
   }
 
   let fpMap = new Map<string, FingerprintMeta>();
+  let siteProfile: Record<string, unknown> | null = null;
+  let siteLabel: string | null = null;
   try {
+    const db = getDb();
     const ids = composition.selected_authors.map((a) => a.fingerprint_id);
     if (ids.length > 0) {
-      const db = getDb();
       const placeholders = ids.map(() => '?').join(',');
       const rows = db
         .prepare(
@@ -178,6 +189,16 @@ export async function POST(req: NextRequest) {
         }>;
       fpMap = buildFingerprintMetaMap(rows);
     }
+
+    if (body.target_site_id) {
+      const row = db
+        .prepare(`SELECT id, site_name, section, profile_json FROM sites WHERE id = ?`)
+        .get(body.target_site_id) as SiteProfileRow | undefined;
+      if (row) {
+        try { siteProfile = JSON.parse(row.profile_json); } catch {/* keep null */}
+        siteLabel = row.section ? `${row.site_name} · ${row.section}` : row.site_name;
+      }
+    }
   } catch (err) {
     return jsonError(`数据库读取失败：${(err as Error).message}`, 500);
   }
@@ -185,7 +206,10 @@ export async function POST(req: NextRequest) {
   return createSseStream(async (send, _close, abortSignal) => {
     send('open', { ok: true, sections: outline.sections.length });
 
-    const prompt = buildArticlePrompt(idea, composition, fpMap, outline, targetPlatform);
+    const prompt = buildArticlePrompt(idea, composition, fpMap, outline, targetPlatform, {
+      siteLabel,
+      siteProfile,
+    });
 
     let raw = '';
     try {

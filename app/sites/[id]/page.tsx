@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { HomeNav } from '@/components/nav/HomeNav';
 import { getDb } from '@/lib/db';
+import { AddSamplesPanel } from './AddSamplesPanel';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -20,6 +21,14 @@ interface SiteRow {
   source_article_count: number | null;
   created_at: number;
   updated_at: number | null;
+  iteration_count: number | null;
+}
+
+interface SampleRow {
+  url: string;
+  title: string | null;
+  added_at: number;
+  iteration: number;
 }
 
 interface SiteProfile {
@@ -52,7 +61,8 @@ export default async function SiteDetailPage({ params }: PageProps) {
   const row = db
     .prepare(
       `SELECT id, site_name, section, url_pattern, profile_json,
-              source_url, source_article_count, created_at, updated_at
+              source_url, source_article_count, created_at, updated_at,
+              iteration_count
        FROM sites
        WHERE id = ?`,
     )
@@ -68,6 +78,13 @@ export default async function SiteDetailPage({ params }: PageProps) {
   } catch {
     profile = {};
   }
+
+  const samples = db
+    .prepare(
+      `SELECT url, title, added_at, iteration FROM site_articles
+       WHERE site_id = ? ORDER BY added_at DESC`,
+    )
+    .all(id) as SampleRow[];
 
   return (
     <>
@@ -90,7 +107,7 @@ export default async function SiteDetailPage({ params }: PageProps) {
                   <span className="meta-sep">·</span>
                 </>
               )}
-              <span>样本 {row.source_article_count ?? '—'} 篇</span>
+              <span>样本 {samples.length || row.source_article_count || '—'} 篇</span>
               <span className="meta-sep">·</span>
               <span>建于 {formatDate(row.created_at)}</span>
             </div>
@@ -210,6 +227,18 @@ export default async function SiteDetailPage({ params }: PageProps) {
             </div>
           </article>
         </div>
+
+        <AddSamplesPanel
+          siteId={row.id}
+          sourceUrl={row.source_url}
+          iterationCount={row.iteration_count ?? 1}
+          samples={samples.map((s) => ({
+            url: s.url,
+            title: s.title,
+            added_at_label: formatDate(s.added_at),
+            iteration: s.iteration,
+          }))}
+        />
 
         <details className="raw-json-panel">
           <summary className="raw-json-summary">

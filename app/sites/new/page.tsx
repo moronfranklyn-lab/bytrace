@@ -169,7 +169,7 @@ export default function NewSiteProfilePage() {
                 disabled={phase === 'crawling' || phase === 'extracting'}
               />
               <span className="intake-hint">
-                目前支持少数派、知乎、优设。公众号反爬较硬，工具不爬。
+                目前支持少数派、知乎、优设、人人都是产品经理。公众号反爬较硬，工具不爬。
               </span>
             </div>
 

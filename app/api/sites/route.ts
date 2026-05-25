@@ -1,23 +1,20 @@
 import { NextRequest } from 'next/server';
 import { nanoid } from 'nanoid';
 import { getDb } from '@/lib/db';
-import { streamClaude } from '@/lib/claude';
-import { buildSiteProfilePrompt, type SiteProfileArticle } from '@/lib/prompts/siteprofile';
 import {
-  crawlArticle,
   crawlAuthorIndex,
   detectUrlType,
   isCrawlError,
-  type CrawledArticle,
 } from '@/lib/crawler';
+import {
+  fetchArticlesWithDedupe,
+  runProfileExtraction,
+  MIN_ARTICLES_FOR_PROFILE,
+  MAX_ARTICLES_FOR_PROFILE,
+} from '@/lib/sites/profile-engine';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-
-const MIN_ARTICLES_FOR_PROFILE = 3;
-const TARGET_ARTICLES_FOR_PROFILE = 8;
-const MAX_ARTICLES_FOR_PROFILE = 10;
-const PER_FETCH_SLEEP_MS = 1000;
 
 interface SiteRow {
   id: string;
@@ -29,6 +26,7 @@ interface SiteRow {
   source_article_count: number | null;
   created_at: number;
   updated_at: number | null;
+  iteration_count: number | null;
 }
 
 interface SiteListItem {
@@ -56,21 +54,6 @@ function jsonOk(payload: unknown, status = 200) {
   });
 }
 
-function stripJsonFence(raw: string): string {
-  const fenceMatch = raw.match(/```json\s*([\s\S]*?)```/i);
-  if (fenceMatch) return fenceMatch[1].trim();
-  const firstBrace = raw.indexOf('{');
-  const lastBrace = raw.lastIndexOf('}');
-  if (firstBrace !== -1 && lastBrace > firstBrace) {
-    return raw.slice(firstBrace, lastBrace + 1).trim();
-  }
-  return raw.trim();
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
 function toListItem(row: SiteRow): SiteListItem {
   let preferred: string[] = [];
   let range: [number, number] | null = null;
@@ -93,7 +76,7 @@ function toListItem(row: SiteRow): SiteListItem {
       ];
     }
   } catch {
-    // 容错：profile_json 解析失败也要列出来
+    // 容错
   }
   return {
     id: row.id,
@@ -107,14 +90,15 @@ function toListItem(row: SiteRow): SiteListItem {
   };
 }
 
-/** GET /api/sites —— 列出所有站点画像 */
+/** GET /api/sites */
 export async function GET() {
   try {
     const db = getDb();
     const rows = db
       .prepare(
         `SELECT id, site_name, section, url_pattern, profile_json,
-                source_url, source_article_count, created_at, updated_at
+                source_url, source_article_count, created_at, updated_at,
+                iteration_count
          FROM sites
          ORDER BY COALESCE(updated_at, created_at) DESC`,
       )
@@ -128,17 +112,15 @@ export async function GET() {
 /**
  * POST /api/sites —— 新建站点画像
  *
- * Body:
- *   { url: string, section?: string, article_urls?: string[] }
+ * Body: { url: string, section?: string, article_urls?: string[] }
  *
  * 流程：
- * 1. 拿到 URL，先 detectUrlType 看看是不是公众号 / 支持
- * 2. 如果传了 article_urls，直接逐个 crawlArticle；否则 crawlAuthorIndex 拿一批
- * 3. 选前 8 篇，每篇之间 sleep 1s
- * 4. 拼 prompt 送 Claude，等完整输出
- * 5. 解析 JSON 入库
- *
- * 这是同步路由（不流式）——前端会显示 loading，~2 分钟。
+ * 1. detectUrlType 拦公众号
+ * 2. 收集候选 URL（explicit > crawlAuthorIndex）
+ * 3. 先建 site 行（拿到 id 后才能写 site_articles）→ profile_json 占位空对象
+ * 4. fetchArticlesWithDedupe(siteId, urls, iteration=1)
+ * 5. runProfileExtraction(newly_added) → 解析 profile
+ * 6. UPDATE sites 写真正的 profile_json
  */
 export async function POST(req: NextRequest) {
   let body: {
@@ -162,7 +144,6 @@ export async function POST(req: NextRequest) {
     return jsonError('站点 URL 不能为空');
   }
 
-  // ---- 1. 平台识别 ----
   const urlType = detectUrlType(url);
   if (urlType.is_wechat) {
     return jsonError(
@@ -171,7 +152,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ---- 2. 收集文章 URL 列表 ----
   let candidateUrls: string[] = [];
   let sourceAuthorName: string | null = null;
 
@@ -196,40 +176,37 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ---- 3. 逐篇爬，每篇之间 sleep 1s 避免请求过急 ----
-  const articles: SiteProfileArticle[] = [];
-  const failedUrls: { url: string; reason: string }[] = [];
   let host = '';
   try {
     host = new URL(url).hostname;
-  } catch {
-    // ignore
+  } catch {/* ignore */}
+
+  // 先插一行占位 site，拿到 id 才能写 site_articles
+  const db = getDb();
+  const id = nanoid(14);
+  const now = Date.now();
+  const placeholderName =
+    sourceAuthorName || host || '提炼中…';
+  db.prepare(
+    `INSERT INTO sites
+       (id, site_name, section, url_pattern, profile_json,
+        source_url, source_article_count, created_at, updated_at, iteration_count)
+     VALUES (?, ?, ?, ?, '{}', ?, 0, ?, ?, 1)`,
+  ).run(id, placeholderName, section, host, url, now, now);
+
+  let fetchResult;
+  try {
+    fetchResult = await fetchArticlesWithDedupe(id, candidateUrls, 1);
+  } catch (err) {
+    db.prepare(`DELETE FROM sites WHERE id = ?`).run(id);
+    return jsonError(`爬文章失败：${(err as Error).message}`, 502);
   }
 
-  for (let i = 0; i < candidateUrls.length; i++) {
-    if (articles.length >= TARGET_ARTICLES_FOR_PROFILE) break;
-    if (i > 0) await sleep(PER_FETCH_SLEEP_MS);
-    const articleUrl = candidateUrls[i];
-    const a = await crawlArticle(articleUrl);
-    if (isCrawlError(a)) {
-      failedUrls.push({ url: articleUrl, reason: a.message });
-      continue;
-    }
-    const ca = a as CrawledArticle;
-    if (!ca.content || ca.content.length < 200) {
-      failedUrls.push({ url: articleUrl, reason: '正文太短' });
-      continue;
-    }
-    articles.push({
-      title: ca.title ?? undefined,
-      url: ca.url,
-      content: ca.content,
-    });
-  }
-
-  if (articles.length < MIN_ARTICLES_FOR_PROFILE) {
+  if (fetchResult.newly_added.length < MIN_ARTICLES_FOR_PROFILE) {
+    db.prepare(`DELETE FROM sites WHERE id = ?`).run(id);
+    db.prepare(`DELETE FROM site_articles WHERE site_id = ?`).run(id);
     return jsonError(
-      `这一轮只爬到了 ${articles.length} 篇可用的文章（目标 ${MIN_ARTICLES_FOR_PROFILE} 篇起步）。失败：${failedUrls
+      `这一轮只爬到了 ${fetchResult.newly_added.length} 篇可用的文章（目标 ${MIN_ARTICLES_FOR_PROFILE} 篇起步）。失败：${fetchResult.failed
         .slice(0, 3)
         .map((f) => f.reason)
         .join('；')}`,
@@ -237,78 +214,63 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ---- 4. 拼 prompt 调 Claude ----
-  const prompt = buildSiteProfilePrompt(articles, {
-    siteHost: host,
-    sectionHint: section ?? undefined,
-  });
-
-  let raw = '';
+  let profile: Record<string, unknown>;
   try {
-    raw = await streamClaude(prompt, { timeoutMs: 240_000 });
+    profile = await runProfileExtraction(fetchResult.newly_added, {
+      siteHost: host,
+      sectionHint: section ?? undefined,
+    });
   } catch (err) {
+    db.prepare(`DELETE FROM sites WHERE id = ?`).run(id);
+    db.prepare(`DELETE FROM site_articles WHERE site_id = ?`).run(id);
     return jsonError(
       `调模型失败：${(err as Error).message}`,
       502,
     );
   }
 
-  const cleanedJson = stripJsonFence(raw);
-  let profile: Record<string, unknown>;
-  try {
-    profile = JSON.parse(cleanedJson);
-  } catch (err) {
-    return jsonError(
-      `模型输出了一段不太像 JSON 的东西：${(err as Error).message}`,
-      502,
-    );
-  }
+  const siteName =
+    typeof profile.site_name === 'string' && profile.site_name
+      ? (profile.site_name as string)
+      : sourceAuthorName || host || '未命名站点';
+  const sectionFinal =
+    (typeof profile.section === 'string' && profile.section) ||
+    section ||
+    null;
+  const urlPattern =
+    typeof profile.url_pattern === 'string' && profile.url_pattern
+      ? (profile.url_pattern as string)
+      : host;
 
-  // ---- 5. 落库 ----
-  try {
-    const db = getDb();
-    const id = nanoid(14);
-    const now = Date.now();
-    const siteName =
-      typeof profile.site_name === 'string' && profile.site_name
-        ? (profile.site_name as string)
-        : sourceAuthorName || host || '未命名站点';
-    const sectionFinal =
-      (typeof profile.section === 'string' && profile.section) ||
-      section ||
-      null;
-    const urlPattern =
-      typeof profile.url_pattern === 'string' && profile.url_pattern
-        ? (profile.url_pattern as string)
-        : host;
+  // 跟 PATCH 对齐：source_article_count 永远是 COUNT(site_articles) 累计值
+  const totalRow = db
+    .prepare(`SELECT COUNT(*) AS n FROM site_articles WHERE site_id = ?`)
+    .get(id) as { n: number };
+  const totalCount = totalRow.n;
 
-    db.prepare(
-      `INSERT INTO sites
-        (id, site_name, section, url_pattern, profile_json,
-         source_url, source_article_count, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      id,
-      siteName,
-      sectionFinal,
-      urlPattern,
-      JSON.stringify(profile),
-      url,
-      articles.length,
-      now,
-      now,
-    );
+  db.prepare(
+    `UPDATE sites SET
+       site_name = ?, section = ?, url_pattern = ?, profile_json = ?,
+       source_article_count = ?, updated_at = ?
+     WHERE id = ?`,
+  ).run(
+    siteName,
+    sectionFinal,
+    urlPattern,
+    JSON.stringify(profile),
+    totalCount,
+    Date.now(),
+    id,
+  );
 
-    return jsonOk({
-      id,
-      site_name: siteName,
-      section: sectionFinal,
-      url_pattern: urlPattern,
-      source_article_count: articles.length,
-      failed_count: failedUrls.length,
-      profile,
-    });
-  } catch (err) {
-    return jsonError(`本地数据库这次没接住：${(err as Error).message}`, 500);
-  }
+  return jsonOk({
+    id,
+    site_name: siteName,
+    section: sectionFinal,
+    url_pattern: urlPattern,
+    source_article_count: totalCount,
+    failed_count: fetchResult.failed.length,
+    skipped_count: fetchResult.skipped_duplicate.length,
+    profile,
+  });
 }

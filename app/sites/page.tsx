@@ -14,6 +14,8 @@ interface SiteRow {
   source_article_count: number | null;
   created_at: number;
   updated_at: number | null;
+  /** site_articles 表实时 COUNT，比 source_article_count 字段更可靠 */
+  real_article_count: number;
 }
 
 interface DisplaySite {
@@ -34,10 +36,11 @@ function loadSites(): DisplaySite[] {
     const db = getDb();
     const rows = db
       .prepare(
-        `SELECT id, site_name, section, url_pattern, profile_json,
-                source_article_count, created_at, updated_at
-         FROM sites
-         ORDER BY COALESCE(updated_at, created_at) DESC`,
+        `SELECT s.id, s.site_name, s.section, s.url_pattern, s.profile_json,
+                s.source_article_count, s.created_at, s.updated_at,
+                (SELECT COUNT(*) FROM site_articles sa WHERE sa.site_id = s.id) AS real_article_count
+         FROM sites s
+         ORDER BY COALESCE(s.updated_at, s.created_at) DESC`,
       )
       .all() as SiteRow[];
 
@@ -69,12 +72,14 @@ function loadSites(): DisplaySite[] {
       } catch {
         // ignore
       }
+      // 优先用实时 COUNT；row.source_article_count 是历史字段值（可能过时）
+      const displayCount = row.real_article_count || row.source_article_count;
       return {
         id: row.id,
         site_name: row.site_name,
         section: row.section,
         url_pattern: row.url_pattern,
-        source_article_count: row.source_article_count,
+        source_article_count: displayCount,
         created_at: row.created_at,
         preferred_topics: preferred,
         word_count_range: range,

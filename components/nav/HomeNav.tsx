@@ -13,6 +13,7 @@ const LINKS: Array<{ href: string; label: string; match: string }> = [
   { href: '/', label: '工作台', match: '/' },
   { href: '/fingerprints', label: '博主指纹', match: '/fingerprints' },
   { href: '/sites', label: '站点画像', match: '/sites' },
+  { href: '/recipes', label: '风格配方', match: '/recipes' },
   { href: '/topics', label: '选题中心', match: '/topics' },
   { href: '/articles', label: '历史文章', match: '/articles' },
 ];

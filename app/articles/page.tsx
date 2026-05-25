@@ -1,33 +1,169 @@
 import Link from 'next/link';
 import { HomeNav } from '@/components/nav/HomeNav';
 import { getDb } from '@/lib/db';
-import { ArticleFilters } from './ArticleFilters';
+import { ensureComposeColumns } from '@/lib/compose-schema';
+import { ArticleSearch } from './ArticleSearch';
+import { ArticleCard } from './ArticleCard';
+import { getPlatform, isValidPlatformKey, type PlatformKey } from '@/lib/platforms';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 interface SearchParams {
   q?: string;
-  fingerprint?: string;
-  platform?: string;
-  layout?: string;
 }
 
-interface ArticleListRow {
+interface ArticleRow {
   id: string;
   title: string | null;
   platform_target: string | null;
   layout_theme: string | null;
+  content_md: string | null;
+  refine_versions_json: string | null;
   created_at: number;
-  fingerprint_id: string | null;
   author_name: string | null;
   author_avatar: string | null;
-  excerpt: string | null;
+}
+
+interface RefineVersionEntry {
+  ts: number;
+  source_platform: string;
+  target_platform: string;
+  content_md: string;
+}
+
+export interface PlatformVersion {
+  key: PlatformKey;
+  name: string;
+  /** 是否是这篇文章最初生成的那个平台版本（卡片默认选中它） */
+  is_primary: boolean;
+  content_md: string;
+  word_count: number;
+  paragraph_count: number;
+  excerpt: string;
+}
+
+export interface ArticleCardData {
+  id: string;
+  title: string;
+  author_name: string | null;
+  author_avatar: string | null;
+  layout_theme: string | null;
+  created_at: number;
+  /** 这篇文章存在的所有平台版本（按 PlatformKey 去重，取每个平台最新一版） */
+  versions: PlatformVersion[];
 }
 
 function fmtDate(ts: number): string {
   const d = new Date(ts);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function countCjkWords(md: string): number {
+  // 去 markdown 标记后按字符计——CJK 一字一词
+  const stripped = md
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/[#>*_`~\-]/g, '')
+    .replace(/\s+/g, '');
+  return stripped.length;
+}
+
+function countParagraphs(md: string): number {
+  return md.split(/\n{2,}/).filter((p) => p.trim().length > 0).length;
+}
+
+function buildExcerpt(md: string): string {
+  const stripped = md
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/[*_`~]/g, '')
+    .trim();
+  return stripped.slice(0, 140);
+}
+
+function resolvePlatformKey(raw: string | null | undefined): PlatformKey | null {
+  if (!raw) return null;
+  const k = raw.trim();
+  // 直接命中英文 key
+  if (isValidPlatformKey(k)) return k as PlatformKey;
+  // 兼容旧数据里可能存的中文名（少量历史记录）
+  const CN_TO_KEY: Record<string, PlatformKey> = {
+    '公众号': 'wechat',
+    '知乎': 'zhihu',
+    '少数派': 'sspai',
+    '优设': 'uisdc',
+    '小红书': 'xhs',
+    'B站': 'bilibili',
+    'B 站': 'bilibili',
+    '抖音': 'douyin',
+    'YouTube': 'youtube',
+    '自定义': 'custom',
+  };
+  return CN_TO_KEY[k] ?? null;
+}
+
+function buildCardData(row: ArticleRow): ArticleCardData | null {
+  const primaryKey = resolvePlatformKey(row.platform_target);
+  const baseMd = row.content_md ?? '';
+
+  // 按 PlatformKey 收集版本，同平台多次改写取最新一条
+  const byKey = new Map<PlatformKey, { content_md: string; ts: number }>();
+  if (primaryKey && baseMd.length > 0) {
+    byKey.set(primaryKey, { content_md: baseMd, ts: row.created_at });
+  }
+
+  let refineVersions: RefineVersionEntry[] = [];
+  try {
+    if (row.refine_versions_json) {
+      const p = JSON.parse(row.refine_versions_json);
+      if (Array.isArray(p)) refineVersions = p as RefineVersionEntry[];
+    }
+  } catch {/* ignore */}
+
+  for (const v of refineVersions) {
+    const key = resolvePlatformKey(v.target_platform);
+    if (!key) continue;
+    if (!v.content_md) continue;
+    const prev = byKey.get(key);
+    if (!prev || v.ts > prev.ts) {
+      byKey.set(key, { content_md: v.content_md, ts: v.ts });
+    }
+  }
+
+  if (byKey.size === 0) return null;
+
+  const versions: PlatformVersion[] = Array.from(byKey.entries())
+    .map(([key, { content_md }]) => {
+      const trait = getPlatform(key);
+      return {
+        key,
+        name: trait.name,
+        is_primary: key === primaryKey,
+        content_md,
+        word_count: countCjkWords(content_md),
+        paragraph_count: countParagraphs(content_md),
+        excerpt: buildExcerpt(content_md),
+      };
+    })
+    // 主平台排前面，其它按字数从大到小（深度文优先看）
+    .sort((a, b) => {
+      if (a.is_primary && !b.is_primary) return -1;
+      if (!a.is_primary && b.is_primary) return 1;
+      return b.word_count - a.word_count;
+    });
+
+  return {
+    id: row.id,
+    title: row.title?.trim() || '（无标题草稿）',
+    author_name: row.author_name,
+    author_avatar: row.author_avatar,
+    layout_theme: row.layout_theme,
+    created_at: row.created_at,
+    versions,
+  };
 }
 
 export default async function ArticlesPage({
@@ -37,57 +173,22 @@ export default async function ArticlesPage({
 }) {
   const sp = await searchParams;
   const q = (sp.q ?? '').trim();
-  const fp = (sp.fingerprint ?? '').trim();
-  const platform = (sp.platform ?? '').trim();
-  const layout = (sp.layout ?? '').trim();
 
+  ensureComposeColumns();
   const db = getDb();
-
-  // 取所有筛选下拉选项
-  const allFps = db
-    .prepare(
-      `SELECT f.id, a.name AS author_name
-       FROM fingerprints f JOIN authors a ON a.id = f.author_id
-       ORDER BY a.last_used_at DESC`,
-    )
-    .all() as { id: string; author_name: string }[];
-
-  const distinctPlatforms = db
-    .prepare(
-      `SELECT DISTINCT platform_target FROM articles WHERE platform_target IS NOT NULL AND platform_target != ''`,
-    )
-    .all() as { platform_target: string }[];
-  const distinctLayouts = db
-    .prepare(
-      `SELECT DISTINCT layout_theme FROM articles WHERE layout_theme IS NOT NULL AND layout_theme != ''`,
-    )
-    .all() as { layout_theme: string }[];
 
   const where: string[] = [];
   const args: unknown[] = [];
   if (q) {
-    where.push(`(art.title LIKE ? OR art.user_prompt LIKE ?)`);
-    args.push(`%${q}%`, `%${q}%`);
-  }
-  if (fp) {
-    where.push(`art.fingerprint_id = ?`);
-    args.push(fp);
-  }
-  if (platform) {
-    where.push(`art.platform_target = ?`);
-    args.push(platform);
-  }
-  if (layout) {
-    where.push(`art.layout_theme = ?`);
-    args.push(layout);
+    where.push(`(art.title LIKE ? OR art.user_prompt LIKE ? OR art.content_md LIKE ?)`);
+    args.push(`%${q}%`, `%${q}%`, `%${q}%`);
   }
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
   const rows = db
     .prepare(
-      `SELECT art.id, art.title, art.platform_target, art.layout_theme, art.created_at,
-              art.fingerprint_id,
-              substr(coalesce(art.content_md, art.user_prompt, ''), 1, 140) AS excerpt,
+      `SELECT art.id, art.title, art.platform_target, art.layout_theme,
+              art.content_md, art.refine_versions_json, art.created_at,
               a.name AS author_name, a.avatar_emoji AS author_avatar
        FROM articles art
        LEFT JOIN fingerprints f ON f.id = art.fingerprint_id
@@ -95,7 +196,11 @@ export default async function ArticlesPage({
        ${whereSql}
        ORDER BY art.created_at DESC`,
     )
-    .all(...args) as ArticleListRow[];
+    .all(...args) as ArticleRow[];
+
+  const cards = rows
+    .map(buildCardData)
+    .filter((c): c is ArticleCardData => c !== null);
 
   return (
     <>
@@ -107,29 +212,19 @@ export default async function ArticlesPage({
             <em>历史</em>文章
           </h1>
           <p className="hero-subtitle" style={{ fontSize: 15, maxWidth: 620 }}>
-            每一次「生成」都会落到这里。可以按博主、平台、版式筛，也能按标题搜。
+            每一次「生成」都会落到这里。点平台 chip 可以看同一篇在不同平台调整了什么。
           </p>
         </header>
 
-        <ArticleFilters
-          q={q}
-          fingerprint={fp}
-          platform={platform}
-          layout={layout}
-          fingerprints={allFps}
-          platforms={distinctPlatforms.map((p) => p.platform_target)}
-          layouts={distinctLayouts.map((l) => l.layout_theme)}
-        />
+        <ArticleSearch initialQ={q} />
 
-        {rows.length === 0 ? (
+        {cards.length === 0 ? (
           <div className="empty-state" style={{ marginTop: 24 }}>
             <p className="empty-state-title">
-              {q || fp || platform || layout ? '没找到符合条件的文章' : '历史里还没有文章'}
+              {q ? '没找到符合条件的文章' : '历史里还没有文章'}
             </p>
             <p className="empty-state-desc">
-              {q || fp || platform || layout
-                ? '换一个关键词或清掉筛选试试'
-                : '去 /compose 写一篇，写完会自动归档到这里'}
+              {q ? '换一个关键词试试' : '去 /compose 写一篇，写完会自动归档到这里'}
             </p>
             <Link href="/compose" className="btn btn-primary">
               开始写一篇
@@ -137,34 +232,12 @@ export default async function ArticlesPage({
             </Link>
           </div>
         ) : (
-          <ul className="article-timeline enter-stagger">
-            {rows.map((r) => {
-              const title = r.title?.trim() || '（无标题草稿）';
-              return (
-                <li key={r.id} className="article-row">
-                  <Link href={`/articles/${r.id}`} className="article-row-link">
-                    <div className="article-row-head">
-                      <h3 className="article-row-title">{title}</h3>
-                      <div className="article-row-meta">
-                        {r.author_name && (
-                          <span className="tag tag-lang">{r.author_avatar || r.author_name.slice(0, 1)} · {r.author_name}</span>
-                        )}
-                        {r.platform_target && (
-                          <span className="tag">{r.platform_target}</span>
-                        )}
-                        {r.layout_theme && (
-                          <span className="tag tag-struct">{r.layout_theme}</span>
-                        )}
-                        <span className="article-row-date">{fmtDate(r.created_at)}</span>
-                      </div>
-                    </div>
-                    {r.excerpt && (
-                      <p className="article-row-excerpt">{r.excerpt.trim().slice(0, 140)}…</p>
-                    )}
-                  </Link>
-                </li>
-              );
-            })}
+          <ul className="article-card-grid enter-stagger">
+            {cards.map((c) => (
+              <li key={c.id}>
+                <ArticleCard data={c} dateLabel={fmtDate(c.created_at)} />
+              </li>
+            ))}
           </ul>
         )}
       </main>

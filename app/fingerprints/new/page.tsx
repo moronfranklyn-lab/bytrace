@@ -17,6 +17,20 @@ type CardStatus =
   | 'analyzed'     // stage1 完成
   | 'error';
 
+// Stage 0 自动分类返回的大类（也可能 null，例如 LLM 抽不出来）
+type AutoCategory =
+  | '科技'
+  | '经济金融'
+  | '知识科普'
+  | '生活情感'
+  | '职场创业'
+  | '文化娱乐'
+  | '时事评论'
+  | '健康医学'
+  | null;
+
+type CategoryConfidence = 'high' | 'medium' | 'low' | null;
+
 interface CardData {
   id: number;             // local key
   mode: Mode;
@@ -33,6 +47,9 @@ interface CardData {
   pasteContent: string;
   status: CardStatus;
   message: string | null; // 试爬失败 / 分析失败的提示
+  // Stage 0 自动打的"大类"标签（v3 在 stage1 之前先跑一次低成本分类）
+  autoCategory: AutoCategory;
+  categoryConfidence: CategoryConfidence;
 }
 
 const PLATFORM_OPTIONS = [
@@ -50,7 +67,7 @@ const CATEGORIES = ['观点', '案例', '教学', '评论', '杂感'];
 
 const MIN_ARTICLES = 5;      // 点「开始拆解」的下限（5 篇起步才能拆出风格）
 const INITIAL_CARDS = 1;     // 页面初始显示几张卡（轻盈一点，按需 +）
-const MAX_ARTICLES = 12;
+const MAX_ARTICLES = 20;
 const MIN_PASTE_CHARS = 80;
 const MIN_URL_CRAWL_CHARS = 200; // URL 爬到的内容低于这个字数视为「语料太少」，不计入就绪（如 B 站无字幕视频只能拿到标题+简介）
 
@@ -66,6 +83,8 @@ function newCard(): CardData {
     pasteContent: '',
     status: 'idle',
     message: null,
+    autoCategory: null,
+    categoryConfidence: null,
   };
 }
 
@@ -109,10 +128,18 @@ export default function NewFingerprintPage() {
   const [currentPhaseLabel, setCurrentPhaseLabel] = useState('');
   const [errorState, setErrorState] = useState<{ message: string; detail?: string } | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  // Stage 0 自动分类 / 按类别细分指纹的小提示
+  const [stage0Hint, setStage0Hint] = useState<string | null>(null);
+  const [categoryProfilesDone, setCategoryProfilesDone] = useState<string[]>([]);
 
   const abortRef = useRef<AbortController | null>(null);
   const streamBoxRef = useRef<HTMLDivElement>(null);
   const elapsedTimerRef = useRef<number | null>(null);
+  // 让 setTimeout / 异步回调能拿到最新 cards，避开 React 闭包陷阱
+  const cardsRef = useRef<CardData[]>(cards);
+  useEffect(() => {
+    cardsRef.current = cards;
+  }, [cards]);
 
   useEffect(() => {
     if (streamBoxRef.current) {
@@ -170,20 +197,24 @@ export default function NewFingerprintPage() {
     return ready >= MIN_ARTICLES;
   }, [authorName, cards]);
 
-  const tryCrawl = async (card: CardData) => {
+  const tryCrawl = async (card: CardData, opts?: { allowExpandIndex?: boolean }) => {
     if (!card.url.trim()) {
       useToastStore.getState().show('先填 URL 再试爬', 'error');
       return;
     }
+    // 默认允许展开 index；从 tryCrawlAll 批量进入时禁止（防止递归展开）
+    const allowExpandIndex = opts?.allowExpandIndex !== false;
     updateCard(card.id, { status: 'crawling', message: null });
     try {
+      // 走 mode=auto：URL 是主页/板块自动展开为多卡；URL 是单篇正常抓
       const res = await fetch('/api/crawl-preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: card.url.trim() }),
+        body: JSON.stringify({ url: card.url.trim(), mode: 'auto' }),
       });
       const json = (await res.json()) as {
         ok?: boolean;
+        mode?: 'article' | 'index';
         title?: string | null;
         preview?: string;
         image_count?: number;
@@ -192,6 +223,9 @@ export default function NewFingerprintPage() {
         hint?: string;
         apify_cost_usd?: number | null;
         apify_platform?: string | null;
+        // index 模式返回字段
+        author_name?: string | null;
+        article_urls?: string[];
       };
       if (!res.ok || !json.ok) {
         updateCard(card.id, {
@@ -200,6 +234,41 @@ export default function NewFingerprintPage() {
         });
         return;
       }
+
+      // index 模式：把这张卡变回 idle（URL 已挪走），并把抓到的文章 URL 灌进多张新卡
+      if (json.mode === 'index' && Array.isArray(json.article_urls) && json.article_urls.length > 0) {
+        if (!allowExpandIndex) {
+          // 批量试爬阶段又遇到 index URL（多半是分页 / 套娃主页）→ 标失败，避免递归
+          updateCard(card.id, {
+            status: 'crawl-failed',
+            message: '这是主页/板块，已跳过避免递归。请单独点试爬展开',
+          });
+          return;
+        }
+        const urls = json.article_urls;
+        // 当前卡清掉 URL（即将被新卡替代）
+        updateCard(card.id, {
+          url: '',
+          status: 'idle',
+          urlPreview: null,
+          message: null,
+        });
+        // 用户没填博主名时，自动用 author_name 兜底
+        if (json.author_name && !authorName.trim()) {
+          setAuthorName(json.author_name);
+        }
+        // silent=true 避免触发「请点'试爬'」误导 toast
+        handleSearchedUrls(urls, { silent: true });
+        useToastStore
+          .getState()
+          .show(`识别为主页，拉到 ${urls.length} 篇文章。正在自动逐篇试爬…`, 'success');
+        // 等 state 写入后再触发批量爬；批量进入时禁止再次展开 index
+        setTimeout(() => {
+          void tryCrawlAll({ allowExpandIndex: false });
+        }, 200);
+        return;
+      }
+
       updateCard(card.id, {
         status: 'crawled',
         message: null,
@@ -211,7 +280,6 @@ export default function NewFingerprintPage() {
           platform: json.platform ?? null,
         },
       });
-      // 走 Apify 抓的提醒一下成本，走本地的不打扰
       if (typeof json.apify_cost_usd === 'number' && json.apify_cost_usd > 0) {
         const cost =
           json.apify_cost_usd < 0.01
@@ -232,9 +300,13 @@ export default function NewFingerprintPage() {
    * 一键全部试爬：扫描所有 URL 模式 + 有 URL + 状态 idle/crawl-failed 的卡片，
    * 并发 3 个一组跑（避免本地请求队列拥挤）。
    * 已抓到（crawled）的不重试 —— 重抓在单卡上「重新抓」按钮里。
+   *
+   * allowExpandIndex=false：批量阶段遇到 index URL 标失败而不是递归展开（默认 true）。
    */
-  const tryCrawlAll = async () => {
-    const pending = cards.filter(
+  const tryCrawlAll = async (opts?: { allowExpandIndex?: boolean }) => {
+    const allowExpandIndex = opts?.allowExpandIndex !== false;
+    // 用 ref 拿最新 cards，避免 setTimeout 触发时闭包过时
+    const pending = cardsRef.current.filter(
       (c) => c.mode === 'url' && c.url.trim() && (c.status === 'idle' || c.status === 'crawl-failed'),
     );
     if (pending.length === 0) {
@@ -245,7 +317,7 @@ export default function NewFingerprintPage() {
     const CONCURRENCY = 3;
     for (let i = 0; i < pending.length; i += CONCURRENCY) {
       const batch = pending.slice(i, i + CONCURRENCY);
-      await Promise.all(batch.map((c) => tryCrawl(c)));
+      await Promise.all(batch.map((c) => tryCrawl(c, { allowExpandIndex })));
     }
     useToastStore.getState().show('全部跑完，看每张卡的状态', 'success');
   };
@@ -266,6 +338,8 @@ export default function NewFingerprintPage() {
     setStreamLog('');
     setCurrentPhaseLabel('正在准备样本');
     setErrorState(null);
+    setStage0Hint(null);
+    setCategoryProfilesDone([]);
     // 重置每张卡的 status
     setCards((prev) =>
       prev.map((c) => ({
@@ -278,9 +352,25 @@ export default function NewFingerprintPage() {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
 
+    // v3 要求每篇 article 自带 platform（按 URL 自动推断，paste 模式用顶层 platform 兜底）
+    const defaultPlatform = platform || 'wechat';
+    const inferPlatformFromUrl = (url: string): string => {
+      try {
+        const h = new URL(url).hostname;
+        if (/zhihu\.com$/i.test(h)) return 'zhihu';
+        if (/sspai\.com$/i.test(h)) return 'sspai';
+        if (/uisdc\.com$/i.test(h)) return 'uisdc';
+        if (/woshipm\.com$/i.test(h)) return 'wechat'; // 把 woshipm 归到「公众号风格长文」
+        if (/(bilibili\.com|b23\.tv)$/i.test(h)) return 'bilibili';
+        if (/(youtube\.com|youtu\.be)$/i.test(h)) return 'youtube';
+        if (/xiaohongshu\.com$/i.test(h)) return 'xhs';
+        if (/douyin\.com$/i.test(h)) return 'douyin';
+      } catch {/* ignore */}
+      return defaultPlatform;
+    };
+
     const payload = {
       author_name: authorName.trim(),
-      platform: platform || undefined,
       articles: cards.filter(cardIsReady).map((c) => {
         if (c.mode === 'url') {
           return {
@@ -288,6 +378,7 @@ export default function NewFingerprintPage() {
             url: c.url.trim(),
             category: c.category,
             title: c.urlPreview?.title ?? undefined,
+            platform: inferPlatformFromUrl(c.url.trim()),
           };
         }
         return {
@@ -295,13 +386,14 @@ export default function NewFingerprintPage() {
           title: c.pasteTitle.trim() || undefined,
           content: c.pasteContent.trim(),
           category: c.category,
+          platform: defaultPlatform,
         };
       }),
     };
 
     let res: Response;
     try {
-      res = await fetch('/api/fingerprint/v2', {
+      res = await fetch('/api/fingerprint/v3', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -340,24 +432,62 @@ export default function NewFingerprintPage() {
           if (d.message) setCurrentPhaseLabel(d.message);
           if (d.phase) setStreamLog((s) => s + `\n[ ${d.phase} ] ${d.message ?? ''}\n`);
         } else if (evt.event === 'article') {
-          const d = evt.data as { index: number; status: string };
+          const d = evt.data as {
+            index: number;
+            status: string;
+            primary_category?: AutoCategory;
+            secondary_category?: string | null;
+            category_confidence?: CategoryConfidence;
+          };
           setCards((prev) =>
-            prev.map((c, i) =>
-              i === d.index
-                ? {
-                    ...c,
-                    status:
-                      d.status === 'ready'
-                        ? 'ready'
-                        : d.status === 'analyzing'
-                          ? 'analyzing'
-                          : d.status === 'analyzed' || d.status === 'analyzed-loose'
-                            ? 'analyzed'
-                            : c.status,
-                  }
-                : c,
-            ),
+            prev.map((c, i) => {
+              if (i !== d.index) return c;
+              // Stage 0：autoCategory / confidence 单独写一份，不动 status（仍是 ready/analyzing 自己的轨迹）
+              if (d.status === 'categorized') {
+                return {
+                  ...c,
+                  autoCategory: d.primary_category ?? null,
+                  categoryConfidence: d.category_confidence ?? null,
+                };
+              }
+              return {
+                ...c,
+                status:
+                  d.status === 'ready'
+                    ? 'ready'
+                    : d.status === 'analyzing'
+                      ? 'analyzing'
+                      : d.status === 'analyzed' || d.status === 'analyzed-loose'
+                        ? 'analyzed'
+                        : c.status,
+              };
+            }),
           );
+        } else if (evt.event === 'stage') {
+          // v3 Stage 0 自动分类 / 按类别细分指纹两个里程碑事件
+          const d = evt.data as { stage?: string; status?: string; message?: string; ms?: number };
+          if (d.stage === 'stage0') {
+            if (d.status === 'done') {
+              setStage0Hint(`类别标签打完了${typeof d.ms === 'number' ? `（${(d.ms / 1000).toFixed(1)}s）` : ''}`);
+            } else {
+              setStage0Hint(d.message || '正在给文章打类别标签');
+              setCurrentPhaseLabel(d.message || '正在给文章打类别标签');
+            }
+          } else if (d.stage === 'category-profiles') {
+            if (d.status === 'done') {
+              setStage0Hint(`类别细分指纹完成${typeof d.ms === 'number' ? `（${(d.ms / 1000).toFixed(1)}s）` : ''}`);
+            } else {
+              setStage0Hint(d.message || '正在按类别细分指纹');
+              setCurrentPhaseLabel(d.message || '正在按类别细分指纹');
+            }
+          }
+        } else if (evt.event === 'category-profile-done') {
+          const d = evt.data as { category?: string; sample_count?: number };
+          if (d.category) {
+            setCategoryProfilesDone((prev) =>
+              prev.includes(d.category!) ? prev : [...prev, d.category!],
+            );
+          }
         } else if (evt.event === 'chunk') {
           const d = evt.data as { stage?: string; index?: number; text?: string };
           if (typeof d.text === 'string') {
@@ -420,7 +550,7 @@ export default function NewFingerprintPage() {
    * 策略：从前往后找「空 URL 卡」填进去；不够就 push 新卡（不超过 MAX_ARTICLES）。
    * 卡片填完后用户仍需点「试爬」走原流程；这一步只负责把 URL 字段填上。
    */
-  const handleSearchedUrls = useCallback((urls: string[]) => {
+  const handleSearchedUrls = useCallback((urls: string[], opts?: { silent?: boolean }) => {
     if (urls.length === 0) return;
     setCards((prev) => {
       const next = [...prev];
@@ -451,9 +581,11 @@ export default function NewFingerprintPage() {
       }
       return next;
     });
-    useToastStore
-      .getState()
-      .show(`已把 ${urls.length} 条链接填到上方卡片，请点"试爬"逐个抓`, 'success');
+    if (!opts?.silent) {
+      useToastStore
+        .getState()
+        .show(`已把 ${urls.length} 条链接填到上方卡片，请点"试爬"逐个抓`, 'success');
+    }
   }, []);
 
   return (
@@ -477,6 +609,14 @@ export default function NewFingerprintPage() {
             if (!authorName.trim()) setAuthorName(name);
           }}
           disabled={phase === 'streaming'}
+        />
+
+        <BatchPastePanel
+          disabled={phase === 'streaming'}
+          onPasted={(urls) => {
+            handleSearchedUrls(urls);
+            setTimeout(() => { void tryCrawlAll(); }, 200);
+          }}
         />
 
         <section className="intake-form">
@@ -560,7 +700,7 @@ export default function NewFingerprintPage() {
                 <button
                   type="button"
                   className="btn btn-secondary"
-                  onClick={tryCrawlAll}
+                  onClick={() => { void tryCrawlAll(); }}
                   disabled={busy || pendingCount === 0}
                   style={{ marginTop: 8, marginLeft: 8 }}
                   title={pendingCount === 0 ? '没有待爬的 URL 卡片' : `并发爬 ${pendingCount} 张`}
@@ -615,6 +755,10 @@ export default function NewFingerprintPage() {
                   <span>{currentPhaseLabel || '工作中'}</span>
                 </div>
                 <div className="stream-status-meta">
+                  {stage0Hint && <div style={{ color: 'var(--accent)' }}>{stage0Hint}</div>}
+                  {categoryProfilesDone.length > 0 && (
+                    <div>已完成 {categoryProfilesDone.length} 个类别：{categoryProfilesDone.join(' / ')}</div>
+                  )}
                   <div>就绪：{cards.filter(cardIsReady).length} 篇 · 已分析 {cards.filter((c) => c.status === 'analyzed').length}</div>
                   <div>已用时：{elapsed}s</div>
                   <div>典型：80-120s</div>
@@ -736,6 +880,24 @@ function ArticleCard({
         <span className="intake-status-dot" style={{ color: statusColor[card.status] }}>
           ● {statusLabel[card.status]}
         </span>
+        {card.autoCategory && (
+          <span
+            className="tag"
+            style={{
+              marginLeft: 6,
+              fontWeight: card.categoryConfidence === 'high' ? 600 : 400,
+              opacity:
+                card.categoryConfidence === 'low'
+                  ? 0.55
+                  : card.categoryConfidence === 'medium'
+                    ? 0.8
+                    : 1,
+            }}
+            title={card.categoryConfidence ? `自动分类 · 置信度 ${card.categoryConfidence}` : '自动分类'}
+          >
+            {card.autoCategory}
+          </span>
+        )}
         {removable && (
           <button
             type="button"
@@ -856,5 +1018,69 @@ function ArticleCard({
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * 批量粘贴 URL 面板：用户从博主主页一次粘 5-20 个文章 URL，自动展开成多张卡。
+ * 跟 AuthorSearch 并列存在——后者是「搜博主名找 URL」，本组件是「我已经有 URL 列表」。
+ * 同样能接收博主主页 URL（mode=auto 后端会自动展开），但显式表达"我打算批量"更直观。
+ */
+function BatchPastePanel({
+  onPasted,
+  disabled,
+}: {
+  onPasted: (urls: string[]) => void;
+  disabled?: boolean;
+}) {
+  const [text, setText] = useState('');
+  const urls = useMemo(
+    () =>
+      text
+        .split(/[\n\s]+/)
+        .map((s) => s.trim())
+        .filter((s) => /^https?:\/\//i.test(s)),
+    [text],
+  );
+
+  const submit = () => {
+    if (urls.length === 0) {
+      useToastStore.getState().show('粘的 URL 一个都没识别出来', 'error');
+      return;
+    }
+    onPasted(urls);
+    setText('');
+  };
+
+  return (
+    <section className="batch-paste-panel">
+      <div className="batch-paste-head">
+        <span className="batch-paste-title">批量粘贴 URL</span>
+        <span className="batch-paste-hint">
+          从博主主页复制文章 URL，一行一个；也可以贴一个主页 URL，工具会自动展开
+        </span>
+      </div>
+      <textarea
+        className="intake-input batch-paste-textarea"
+        rows={3}
+        placeholder={'https://www.woshipm.com/u/1288862\nhttps://sspai.com/post/12345\nhttps://www.woshipm.com/ai/6401832.html'}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        disabled={disabled}
+      />
+      <div className="batch-paste-foot">
+        <span className="batch-paste-count">
+          {urls.length > 0 ? `识别到 ${urls.length} 个 URL` : '还没识别到合法 URL'}
+        </span>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={submit}
+          disabled={disabled || urls.length === 0}
+        >
+          灌入卡片并自动试爬
+        </button>
+      </div>
+    </section>
   );
 }

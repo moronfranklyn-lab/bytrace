@@ -14,6 +14,7 @@ import { Panel } from '@/components/compose/Panel';
 import { Toast } from '@/components/compose/Toast';
 import { PlatformPicker } from '@/components/compose/PlatformPicker';
 import { CompositionExplainer } from '@/components/compose/CompositionExplainer';
+import { ImagePanel } from '@/components/compose/ImagePanel';
 import { PLATFORMS as PLATFORM_TRAITS, getPlatform, type PlatformKey } from '@/lib/platforms';
 import { ARTICLE_CATEGORIES, type ArticleCategory } from '@/lib/prompts/fingerprint-v3-stage0';
 import type { Outline, OutlineSection } from '@/lib/prompts/outline';
@@ -230,6 +231,8 @@ export default function ComposePage() {
   // Step 1 · 目标平台 + 具体站点（可选；选了某个站点画像，prompt 会注入它的 profile）
   const [targetPlatform, setTargetPlatform] = useState<PlatformKey | null>(null);
   const [targetSiteId, setTargetSiteId] = useState<string | null>(null);
+  // Step 1 多选：「顺手出这些版本」勾选的非主平台。主平台默认勾且不可取消。
+  const [additionalPlatforms, setAdditionalPlatforms] = useState<PlatformKey[]>([]);
 
   // Step 2 · 题材
   const [idea, setIdea] = useState('');
@@ -264,12 +267,30 @@ export default function ComposePage() {
   const [outlineError, setOutlineError] = useState<string | null>(null);
 
   // Step 6 — draft
-  const [draftMd, setDraftMd] = useState('');
+  /**
+   * 多平台 draft 状态。key = PlatformKey。
+   *   status: pending（排队中）/ streaming（流式中）/ done（已完成）/ error
+   *   content_md：累计的正文 markdown
+   *   error：单平台失败时的错误信息
+   * 单平台路径下，platforms 长度 = 1，行为退化等同现状。
+   */
+  type DraftPhase = 'pending' | 'streaming' | 'done' | 'error';
+  interface DraftEntry {
+    status: DraftPhase;
+    content_md: string;
+    error?: string;
+  }
+  const [draftPlatforms, setDraftPlatforms] = useState<PlatformKey[]>([]);
+  const [draftMainPlatform, setDraftMainPlatform] = useState<PlatformKey | null>(null);
+  const [draftMap, setDraftMap] = useState<Partial<Record<PlatformKey, DraftEntry>>>({});
+  // active tab：当前 Step 6 用户在看哪一个平台
+  const [activeDraftTab, setActiveDraftTab] = useState<PlatformKey | null>(null);
   const [draftLoading, setDraftLoading] = useState(false);
   const [draftDone, setDraftDone] = useState(false);
+  // 整体级错误（比如连接断了）。单平台失败放在 draftMap[key].error 里。
   const [draftError, setDraftError] = useState<string | null>(null);
   const draftCtrl = useRef<AbortController | null>(null);
-  const draftScrollRef = useRef<HTMLDivElement | null>(null);
+  const draftScrollRefs = useRef<Partial<Record<PlatformKey, HTMLDivElement | null>>>({});
 
   // Step 7 · 预览导出
   const [layout, setLayout] = useState<LayoutKey>('standard');
@@ -480,14 +501,29 @@ export default function ComposePage() {
     }
   }, [authors, customNotes, idea, targetPlatform]);
 
-  // Step 5 -> 6：流式写正文
+  // Step 5 -> 6：流式写正文（支持多平台版本，循环 N 次）
   const goDraft = useCallback(async () => {
     if (!outline) {
       showToast('大纲还没准备好');
       return;
     }
     setStep(6);
-    setDraftMd('');
+    // 构造平台列表：主平台 + additionalPlatforms 去重
+    const main: PlatformKey = targetPlatform ?? 'wechat';
+    const platforms: PlatformKey[] = [main];
+    for (const p of additionalPlatforms) {
+      if (p !== main && !platforms.includes(p)) platforms.push(p);
+    }
+
+    // 初始化每平台状态
+    const initialMap: Partial<Record<PlatformKey, DraftEntry>> = {};
+    for (const p of platforms) {
+      initialMap[p] = { status: 'pending', content_md: '' };
+    }
+    setDraftPlatforms(platforms);
+    setDraftMainPlatform(main);
+    setDraftMap(initialMap);
+    setActiveDraftTab(platforms[0]);
     setDraftLoading(true);
     setDraftDone(false);
     setDraftError(null);
@@ -519,30 +555,88 @@ export default function ComposePage() {
           outline,
           target_platform: targetPlatform ?? undefined,
           target_site_id: targetSiteId ?? undefined,
+          platforms,
         }),
       });
       if (!resp.body) { setDraftError('响应没有 body'); setDraftLoading(false); return; }
       const reader = resp.body.getReader();
       for await (const evt of readSseEvents(reader)) {
-        if (evt.event === 'chunk') {
-          const text = (evt.data as { text?: string })?.text ?? '';
-          setDraftMd((s) => s + text);
-          // 自动滚到底
+        if (evt.event === 'open') {
+          // 服务端确认的 platforms 可能与前端略不同（理论上不会，但稳一手）
+          const d = evt.data as { platforms?: PlatformKey[]; main_platform?: PlatformKey };
+          if (Array.isArray(d.platforms) && d.platforms.length > 0) {
+            setDraftPlatforms(d.platforms);
+            if (d.main_platform) setDraftMainPlatform(d.main_platform);
+            setActiveDraftTab((cur) => cur ?? d.platforms![0]);
+          }
+        } else if (evt.event === 'platform_start') {
+          const d = evt.data as { platform?: PlatformKey };
+          if (!d.platform) continue;
+          const p = d.platform;
+          setDraftMap((m) => ({
+            ...m,
+            [p]: { status: 'streaming', content_md: '', error: undefined },
+          }));
+          // 切到刚开始流的 tab（仅在用户还没主动切走时）
+          setActiveDraftTab((cur) => cur === null ? p : cur);
+        } else if (evt.event === 'delta') {
+          const d = evt.data as { platform?: PlatformKey; delta?: string };
+          if (!d.platform || !d.delta) continue;
+          const p = d.platform;
+          setDraftMap((m) => {
+            const prev = m[p] ?? { status: 'streaming' as DraftPhase, content_md: '' };
+            return {
+              ...m,
+              [p]: { ...prev, status: 'streaming', content_md: prev.content_md + d.delta },
+            };
+          });
+          // 自动滚到底（仅对当前 active tab 滚）
           requestAnimationFrame(() => {
-            const el = draftScrollRef.current;
+            const el = draftScrollRefs.current[p];
             if (el) el.scrollTop = el.scrollHeight;
           });
+        } else if (evt.event === 'platform_done') {
+          const d = evt.data as { platform?: PlatformKey; content_md?: string };
+          if (!d.platform) continue;
+          const p = d.platform;
+          setDraftMap((m) => ({
+            ...m,
+            [p]: { status: 'done', content_md: d.content_md ?? (m[p]?.content_md ?? '') },
+          }));
         } else if (evt.event === 'done') {
-          const d = evt.data as { article_id?: string; content_md?: string };
-          if (d.content_md) setDraftMd(d.content_md);
+          const d = evt.data as {
+            article_id?: string;
+            main_platform?: PlatformKey;
+            versions?: Record<string, string>;
+          };
           if (d.article_id) setArticleId(d.article_id);
+          // 把全部平台的 md 一并塞进 refineMap，Step 7 切平台时优先用缓存（决策 4）
+          if (d.versions && typeof d.versions === 'object') {
+            const cache: Partial<Record<PlatformKey, string>> = {};
+            for (const [pk, md] of Object.entries(d.versions)) {
+              cache[pk as PlatformKey] = md;
+            }
+            setRefineMap((m) => ({ ...m, ...cache }));
+          }
           setDraftLoading(false);
           setDraftDone(true);
         } else if (evt.event === 'error') {
-          const d = evt.data as { message?: string; content_md?: string };
-          if (d.content_md) setDraftMd(d.content_md);
-          setDraftError(d.message || '正文生成出了点状况');
-          setDraftLoading(false);
+          const d = evt.data as { platform?: PlatformKey; message?: string };
+          if (d.platform) {
+            // 单平台失败 - 只标记这一条，后续平台继续
+            const p = d.platform;
+            setDraftMap((m) => ({
+              ...m,
+              [p]: {
+                status: 'error',
+                content_md: m[p]?.content_md ?? '',
+                error: d.message || '这一条卡住了',
+              },
+            }));
+          } else {
+            setDraftError(d.message || '正文生成出了点状况');
+            setDraftLoading(false);
+          }
         }
       }
     } catch (e) {
@@ -553,16 +647,24 @@ export default function ComposePage() {
       }
       setDraftLoading(false);
     }
-  }, [authors, customNotes, idea, outline, showToast, targetPlatform]);
+  }, [authors, customNotes, idea, outline, showToast, targetPlatform, targetSiteId, additionalPlatforms]);
 
   const stopDraft = useCallback(() => {
     draftCtrl.current?.abort();
   }, []);
 
-  // Step 7：切平台 -> 调 refine
+  // 主平台 md（Step 7 用作 fallback 与 refine 源稿）。
+  // 多平台模式下，主平台的 md 就是 draftMap[main].content_md；单平台模式下也走这个。
+  const draftMd = useMemo(() => {
+    const main = draftMainPlatform ?? targetPlatform ?? 'wechat';
+    return draftMap[main]?.content_md ?? '';
+  }, [draftMap, draftMainPlatform, targetPlatform]);
+
+  // Step 7：切平台 -> 优先读 refineMap（决策 4：Step 6 已经把多平台版本灌进来了）
+  //         没命中再回退调 refine 兜底
   const refineForPlatform = useCallback(async (p: PlatformKey) => {
     setPreviewPlatform(p);
-    // 目标平台本身不需要改写（已是原文）
+    // 主平台原文：已经就是 draftMd；其它平台已在 refineMap 里：直接用
     if (p === (targetPlatform ?? 'wechat') || refineMap[p]) {
       showToast(`已切换到 ${PLATFORM_TRAITS.find((x) => x.key === p)?.name}`);
       return;
@@ -646,13 +748,22 @@ export default function ComposePage() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [outlineStream]);
 
-  // 当前正在写的章节：根据 draftMd 里出现了几个 `## ` 判断
+  // 当前正在写的章节：基于 active tab 的 md 计算（决策 3：左侧大纲跟当前 tab）
+  const activeDraftMd = useMemo(() => {
+    if (!activeDraftTab) return '';
+    return draftMap[activeDraftTab]?.content_md ?? '';
+  }, [activeDraftTab, draftMap]);
+  const activeDraftEntry = useMemo(() => {
+    if (!activeDraftTab) return null;
+    return draftMap[activeDraftTab] ?? null;
+  }, [activeDraftTab, draftMap]);
   const currentSectionIdx = useMemo(() => {
     if (!outline) return -1;
-    const headings = (draftMd.match(/^##\s+/gm) ?? []).length;
-    // 已经看到 N 个 ##，说明正在写第 N 个章节
+    // 切到尚未开始的 tab 时，不高亮任何章节（决策 3）
+    if (!activeDraftEntry || activeDraftEntry.status === 'pending') return -1;
+    const headings = (activeDraftMd.match(/^##\s+/gm) ?? []).length;
     return Math.max(0, Math.min(headings - 1, outline.sections.length - 1));
-  }, [draftMd, outline]);
+  }, [activeDraftMd, outline, activeDraftEntry]);
 
   return (
     <>
@@ -667,9 +778,18 @@ export default function ComposePage() {
           <Step1Platform
             value={targetPlatform}
             siteId={targetSiteId}
+            additionalPlatforms={additionalPlatforms}
             onChange={(k, sid) => {
               setTargetPlatform(k);
               setTargetSiteId(sid ?? null);
+              // 切了主平台之后，把 additional 里和主平台重复的去掉
+              setAdditionalPlatforms((arr) => arr.filter((p) => p !== k));
+            }}
+            onToggleAdditional={(k) => {
+              setAdditionalPlatforms((arr) => {
+                if (arr.includes(k)) return arr.filter((x) => x !== k);
+                return [...arr, k];
+              });
             }}
             onNext={goFromPlatformToIdea}
           />
@@ -766,12 +886,16 @@ export default function ComposePage() {
         {step === 6 && (
           <Step6Draft
             outline={outline}
-            draftMd={draftMd}
+            platforms={draftPlatforms}
+            mainPlatform={draftMainPlatform}
+            draftMap={draftMap}
+            activeTab={activeDraftTab}
+            onActiveTabChange={setActiveDraftTab}
             loading={draftLoading}
             done={draftDone}
             error={draftError}
             currentSectionIdx={currentSectionIdx}
-            scrollRef={draftScrollRef}
+            scrollRefs={draftScrollRefs}
             onStop={stopDraft}
             onRetry={goDraft}
             onBack={() => setStep(5)}
@@ -855,11 +979,13 @@ interface SitePickerItem {
 }
 
 function Step1Platform({
-  value, siteId, onChange, onNext,
+  value, siteId, additionalPlatforms, onChange, onToggleAdditional, onNext,
 }: {
   value: PlatformKey | null;
   siteId: string | null;
+  additionalPlatforms: PlatformKey[];
   onChange: (k: PlatformKey, sid?: string | null) => void;
+  onToggleAdditional: (k: PlatformKey) => void;
   onNext: () => void;
 }) {
   const [items, setItems] = useState<SitePickerItem[]>([]);
@@ -990,6 +1116,99 @@ function Step1Platform({
             </>
           )}
         </div>
+      )}
+
+      {/* 顺手出这些版本（决策 1）：主平台默认勾且不可取消，非主平台 chip 多选 */}
+      {value && (
+        <section
+          style={{
+            marginTop: 16,
+            padding: '14px 18px',
+            border: '1px dashed var(--border-medium)',
+            borderRadius: 10,
+            background: 'var(--surface)',
+          }}
+        >
+          <p
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 11,
+              color: 'var(--text-muted)',
+              letterSpacing: '0.06em',
+              margin: '0 0 8px',
+            }}
+          >
+            ALSO PUBLISH TO · 顺手出这些版本
+          </p>
+          <p
+            style={{
+              fontSize: 12,
+              color: 'var(--text-tertiary)',
+              margin: '0 0 10px',
+              lineHeight: 1.6,
+            }}
+          >
+            主平台用上面挑的站点画像写；顺手出的版本只按平台通用调性写，省得到了 Step 7 再一篇一篇改写。
+          </p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {PLATFORM_TRAITS.map((p) => {
+              const isMain = p.key === value;
+              const active = isMain || additionalPlatforms.includes(p.key);
+              return (
+                <button
+                  key={p.key}
+                  type="button"
+                  className="idea-chip"
+                  onClick={() => {
+                    if (isMain) return; // 主平台默认勾不可取消
+                    onToggleAdditional(p.key);
+                  }}
+                  disabled={isMain}
+                  style={
+                    active
+                      ? {
+                          background: 'var(--surface-white)',
+                          color: 'var(--text)',
+                          borderColor: 'var(--border-medium)',
+                          cursor: isMain ? 'default' : 'pointer',
+                          opacity: isMain ? 0.85 : 1,
+                        }
+                      : { cursor: 'pointer' }
+                  }
+                  title={isMain ? '主平台默认就出，没法取消' : `点一下${active ? '取消' : '加上'}：${p.name}`}
+                >
+                  {p.name}
+                  {isMain && (
+                    <span
+                      style={{
+                        marginLeft: 6,
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 10,
+                        color: 'var(--text-muted)',
+                        letterSpacing: '0.05em',
+                      }}
+                    >
+                      主
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          {additionalPlatforms.length > 0 && (
+            <p
+              style={{
+                marginTop: 10,
+                fontSize: 12,
+                color: 'var(--text-muted)',
+                fontFamily: 'var(--font-mono)',
+                letterSpacing: '0.05em',
+              }}
+            >
+              这次会写 {1 + additionalPlatforms.length} 份正文（主平台 + {additionalPlatforms.length} 个顺手版）· 串行生成
+            </p>
+          )}
+        </section>
       )}
 
       <div className="step-actions">
@@ -1439,18 +1658,30 @@ function Step5Outline({
   );
 }
 
-// ---------- Step 6 · 流式正文 ----------
+// ---------- Step 6 · 流式正文（多平台 tab） ----------
+type Step6DraftPhase = 'pending' | 'streaming' | 'done' | 'error';
+interface Step6DraftEntry {
+  status: Step6DraftPhase;
+  content_md: string;
+  error?: string;
+}
+
 function Step6Draft({
-  outline, draftMd, loading, done, error, currentSectionIdx, scrollRef,
+  outline, platforms, mainPlatform, draftMap, activeTab, onActiveTabChange,
+  loading, done, error, currentSectionIdx, scrollRefs,
   onStop, onRetry, onBack, onNext,
 }: {
   outline: Outline | null;
-  draftMd: string;
+  platforms: PlatformKey[];
+  mainPlatform: PlatformKey | null;
+  draftMap: Partial<Record<PlatformKey, Step6DraftEntry>>;
+  activeTab: PlatformKey | null;
+  onActiveTabChange: (p: PlatformKey) => void;
   loading: boolean;
   done: boolean;
   error: string | null;
   currentSectionIdx: number;
-  scrollRef: React.RefObject<HTMLDivElement | null>;
+  scrollRefs: React.MutableRefObject<Partial<Record<PlatformKey, HTMLDivElement | null>>>;
   onStop: () => void;
   onRetry: () => void;
   onBack: () => void;
@@ -1458,25 +1689,55 @@ function Step6Draft({
 }) {
   // 触发首次 generation
   useEffect(() => {
-    if (!loading && !done && !error && !draftMd) {
+    const hasAny = platforms.some((p) => (draftMap[p]?.content_md ?? '').length > 0);
+    if (!loading && !done && !error && !hasAny) {
       onRetry();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const activeEntry: Step6DraftEntry | undefined = activeTab ? draftMap[activeTab] : undefined;
+  const activeMd = activeEntry?.content_md ?? '';
+  const isActiveStreaming = activeEntry?.status === 'streaming';
+
+  // 全局字数统计：所有平台 md 字数求和
+  const totalWords = useMemo(
+    () => Object.values(draftMap).reduce((s, e) => s + (e ? countWords(e.content_md) : 0), 0),
+    [draftMap],
+  );
+
+  // 顶部 status 文案：考虑多平台进度
+  const doneCount = platforms.filter((p) => draftMap[p]?.status === 'done').length;
+  const statusText = (() => {
+    if (!platforms.length) return '空闲';
+    if (loading) {
+      if (platforms.length > 1) {
+        return `正在写第 ${doneCount + 1} / ${platforms.length} 个平台…  共 ${totalWords} 字`;
+      }
+      return `正在写…  已 ${totalWords} 字`;
+    }
+    if (done) {
+      if (platforms.length > 1) return `${platforms.length} 个平台都写完了 · 共 ${totalWords} 字`;
+      return `写完了 · 共 ${totalWords} 字`;
+    }
+    return '空闲';
+  })();
+
   return (
     <section className="step-card">
       <p className="step-card-eyebrow">STEP 06 · STREAM DRAFT</p>
-      <h1 className="step-card-title">正在按大纲写正文</h1>
+      <h1 className="step-card-title">
+        {platforms.length > 1 ? `按大纲，依次写 ${platforms.length} 个平台版本` : '正在按大纲写正文'}
+      </h1>
       <p className="step-card-sub">
-        左侧高亮当前正在写的章节，右侧是实时输出。可以随时中止 / 重新生成。
+        {platforms.length > 1
+          ? '一个个串行写，主平台最先出。顶部 tab 可以提前切过去看进度，左侧大纲跟着当前 tab 走。'
+          : '左侧高亮当前正在写的章节，右侧是实时输出。可以随时中止 / 重新生成。'}
       </p>
 
       <div className="draft-stream-controls">
         <span className={'draft-status-dot ' + (loading ? '' : done ? 'done' : 'idle')} />
-        <span className="draft-status-text">
-          {loading ? `正在写…  已 ${countWords(draftMd)} 字` : done ? `写完了 · 共 ${countWords(draftMd)} 字` : '空闲'}
-        </span>
+        <span className="draft-status-text">{statusText}</span>
         <div style={{ flex: 1 }} />
         {loading && (
           <button type="button" className="btn btn-ghost" onClick={onStop}>
@@ -1496,6 +1757,89 @@ function Step6Draft({
         </Banner>
       )}
 
+      {/* tab bar：每个平台一个 tab，显示状态。单平台时也显示一行 tab，整体一致。 */}
+      {platforms.length > 0 && (
+        <div
+          role="tablist"
+          aria-label="平台版本"
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 6,
+            padding: '8px 10px',
+            background: 'var(--surface)',
+            border: '1px solid var(--border)',
+            borderRadius: 10,
+            marginBottom: 12,
+          }}
+        >
+          {platforms.map((p) => {
+            const entry = draftMap[p];
+            const status = entry?.status ?? 'pending';
+            const isActive = p === activeTab;
+            const isMain = p === mainPlatform;
+            const wordCount = entry ? countWords(entry.content_md) : 0;
+            const statusLabel =
+              status === 'pending' ? '排队中'
+              : status === 'streaming' ? `流式中 · ${wordCount} 字`
+              : status === 'done' ? `已完成 ${wordCount} 字`
+              : '失败';
+            return (
+              <button
+                key={p}
+                role="tab"
+                aria-selected={isActive}
+                type="button"
+                onClick={() => onActiveTabChange(p)}
+                style={{
+                  padding: '8px 14px',
+                  borderRadius: 8,
+                  border: '1px solid ' + (isActive ? 'var(--accent)' : 'var(--border)'),
+                  background: isActive ? 'var(--accent-soft)' : 'var(--surface-white)',
+                  color: 'var(--text)',
+                  fontSize: 13,
+                  fontFamily: 'var(--font-display)',
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}
+              >
+                <span style={{ fontWeight: 500 }}>
+                  {PLATFORM_TRAITS.find((x) => x.key === p)?.name ?? p}
+                </span>
+                {isMain && (
+                  <span
+                    style={{
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 10,
+                      color: 'var(--text-muted)',
+                      letterSpacing: '0.05em',
+                    }}
+                  >
+                    主
+                  </span>
+                )}
+                <span
+                  style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 11,
+                    color:
+                      status === 'streaming' ? 'var(--accent)'
+                      : status === 'done' ? 'var(--success, #2c8a4a)'
+                      : status === 'error' ? 'var(--error, #c0392b)'
+                      : 'var(--text-muted)',
+                    letterSpacing: '0.03em',
+                  }}
+                >
+                  · {statusLabel}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <div className="draft-layout">
         <aside className="draft-outline">
           <div className="draft-outline-head">大纲 · {outline?.sections.length ?? 0} 节</div>
@@ -1504,29 +1848,53 @@ function Step6Draft({
               key={i}
               className={
                 'draft-outline-item ' +
-                (i === currentSectionIdx && loading ? 'active' : i < currentSectionIdx ? 'done' : '')
+                (i === currentSectionIdx && isActiveStreaming ? 'active' : i < currentSectionIdx ? 'done' : '')
               }
             >
               {i + 1}. {s.title}
             </div>
           ))}
         </aside>
-        <div className="draft-stream" ref={scrollRef}>
-          {draftMd ? (
-            <article
-              className="article draft-stream-md"
-              dangerouslySetInnerHTML={{
-                __html:
-                  renderMarkdown(draftMd) +
-                  (loading ? '<span class="cursor-blink"></span>' : ''),
+        {/* 给每个 platform 各起一个独立 scroll 容器，切 tab 不丢已流内容 */}
+        {platforms.map((p) => {
+          const entry = draftMap[p];
+          const md = entry?.content_md ?? '';
+          const status = entry?.status ?? 'pending';
+          const isActive = p === activeTab;
+          return (
+            <div
+              key={p}
+              className="draft-stream"
+              ref={(el) => {
+                scrollRefs.current[p] = el;
               }}
-            />
-          ) : (
-            <pre className="draft-stream-pre" style={{ color: 'var(--text-muted)' }}>
-              {loading ? '正在等待第一段…' : '点上面的"重新生成"开始'}
-            </pre>
-          )}
-        </div>
+              style={isActive ? undefined : { display: 'none' }}
+            >
+              {status === 'error' && entry?.error ? (
+                <Banner kind="error" title={`「${PLATFORM_TRAITS.find((x) => x.key === p)?.name ?? p}」这一条卡住了`}>
+                  {entry.error}
+                </Banner>
+              ) : md ? (
+                <article
+                  className="article draft-stream-md"
+                  dangerouslySetInnerHTML={{
+                    __html:
+                      renderMarkdown(md) +
+                      (status === 'streaming' ? '<span class="cursor-blink"></span>' : ''),
+                  }}
+                />
+              ) : status === 'pending' ? (
+                <pre className="draft-stream-pre" style={{ color: 'var(--text-muted)' }}>
+                  {'轮到这条排队中，到它了再开始'}
+                </pre>
+              ) : (
+                <pre className="draft-stream-pre" style={{ color: 'var(--text-muted)' }}>
+                  {status === 'streaming' ? '正在等待第一段…' : '点上面的"重新生成"开始'}
+                </pre>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       <div className="step-actions">
@@ -1534,7 +1902,7 @@ function Step6Draft({
           <button type="button" className="btn btn-ghost" onClick={onBack} disabled={loading}>← 返回大纲</button>
         </div>
         <div className="step-actions-right">
-          <button type="button" className="btn btn-primary" onClick={onNext} disabled={!draftMd || loading}>
+          <button type="button" className="btn btn-primary" onClick={onNext} disabled={!done && loading}>
             预览与导出 <span className="btn-arrow">→</span>
           </button>
         </div>
@@ -1655,9 +2023,16 @@ function Step7Preview({
         </Panel>
 
         <Panel title="自动配图" icon={<ImageIcon />} open={panels.image} onToggle={() => togglePanel('image')}>
-          <p style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: 0 }}>
-            配图能力由独立模块负责，会在文章保存后异步给出候选。这里暂不展开。
-          </p>
+          <ImagePanel
+            articleContent={draftMd}
+            fingerprintId={
+              chosenRecommendation?.selected_authors
+                ?.slice()
+                .sort((a, b) => b.weight - a.weight)[0]?.fingerprint_id ?? null
+            }
+            slotCount={3}
+            autoStart
+          />
         </Panel>
 
         <Panel title="一键导出" icon={<ExportIcon />} open={panels.export} onToggle={() => togglePanel('export')}>

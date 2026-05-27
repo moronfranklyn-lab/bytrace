@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 /**
  * ImagePanel —— 自动配图面板内容。
@@ -45,6 +45,8 @@ export interface ImagePanelProps {
   localAssetCount?: number;
   unsplashConfigured?: boolean;
   onSelectionChange?: (slots: Slot[]) => void;
+  /** 设为 true 时：组件挂载后若 articleContent 够长且还没跑过，自动 trigger 一次配图。Step 7 draft 完成后接进来用 */
+  autoStart?: boolean;
 }
 
 interface AutoResponse {
@@ -63,6 +65,7 @@ export function ImagePanel({
   localAssetCount = 0,
   unsplashConfigured = false,
   onSelectionChange,
+  autoStart = false,
 }: ImagePanelProps) {
   const [useLocal, setUseLocal] = useState(true);
   const [useUnsplash, setUseUnsplash] = useState(unsplashConfigured);
@@ -71,13 +74,15 @@ export function ImagePanel({
   const [error, setError] = useState<string | null>(null);
   const [slots, setSlots] = useState<Slot[]>([]);
   const [visualStyle, setVisualStyle] = useState<string | null>(null);
+  // autoStart 只触发一次：防止 articleContent 后续变化重复跑
+  const autoStartedRef = useRef(false);
 
   // 通知父组件
   useEffect(() => {
     onSelectionChange?.(slots);
   }, [slots, onSelectionChange]);
 
-  async function runAuto() {
+  const runAuto = useCallback(async () => {
     if (!articleContent || articleContent.trim().length < 50) {
       setError('先把文章写出来再配图');
       return;
@@ -120,7 +125,18 @@ export function ImagePanel({
     } finally {
       setLoading(false);
     }
-  }
+  }, [articleContent, useLocal, useUnsplash, fingerprintId, slotCount]);
+
+  // autoStart：draft 完成后 Step 7 挂上来时自动跑一次
+  useEffect(() => {
+    if (!autoStart) return;
+    if (autoStartedRef.current) return;
+    if (loading) return;
+    if (slots.length > 0) return;
+    if (articleContent.trim().length < 50) return;
+    autoStartedRef.current = true;
+    void runAuto();
+  }, [autoStart, articleContent, loading, slots.length, runAuto]);
 
   function cycleSlotCandidate(slotIdx: number) {
     setSlots((prev) =>

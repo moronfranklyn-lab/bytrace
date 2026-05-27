@@ -1,11 +1,12 @@
 # AutoArticle · 项目构造记录
 
 > 写给下一个 Claude 看。也写给楠几周后回来看。
-> 最后更新：2026-05-26（v3.3 结构能力 + 物件类比库 + streamClaude 真流式 + 风格配方 + 站点画像入口）
+> 最后更新：2026-05-27（v3.3 收尾 · 多平台 N 个版本 + 配图自动接入 + 列表页快捷删除 + v3.3 端到端验证通过）
 > 历史里程碑：
 >   2026-05-25 · v3.1 自动分类 + OpenCLI 接入 + 反爬约束 v2
 >   2026-05-25 · v3.2 风格配方（策略碎片组合可命名 / 保存 / 复用）
 >   2026-05-26 · v3.3 结构能力（structure_repertoire / depth_pattern / analogy_bank）+ outline / article prompt 重写
+>   2026-05-27 · v3.3 收尾 + 多平台 compose（一次出 N 个版本 / Step 6 tabbed）+ 配图自动接入 draft 流 + 指纹列表页快捷删除
 
 ## 这是什么
 
@@ -22,6 +23,71 @@
 - ✅ 文案语气**陪伴而非审判**："这次模型卡住了，我们换个角度再试一次" 不要 "生成失败"
 - ✅ **抽象论点必须配物件级类比**（v3.3 核心约束）：article prompt 强制让模型从博主 analogy_bank 里挑具象物件（"黄牛在天台抽烟" / "户口本进 iCloud"），禁止凭空造抽象隐喻（"如同登山"不算）
 - ✅ **每节正文首段必须回扣上节 thesis**（v3.3 核心约束）：避免"平铺列举式"伪深度，强制论证按因果链 / 双线对比 / 同心圆等形态走
+
+---
+
+## 2026-05-27 这一轮做了什么（要点速览）
+
+主要是 v3.3 收尾验证 + 4 件并行 feat（前 3 件已通过多 agent 并行落地，第 4 件单 agent 单干）：
+
+1. **v3.3 端到端验证通过**（task 1）
+   - 思敏学姐指纹（id `x6xiH7pG20ytvU`）顶层三字段全部就位 ——
+     - `structure_repertoire`（dominant=problem_solution，4 种结构带 execution_traits）
+     - `depth_pattern`（average_layers=4，max_layers=5，6 条 drilling_phrases + 一段 drilling_observation）
+     - `analogy_bank`（15 个**物件级**类比，全具象无抽象隐喻——符合 v3.3 强约束）
+   - **重要事实纠正**：这三字段写在 fingerprint_json **顶层**，不在 platform_fingerprints[平台] 下——读取时别走平台节点。原 agent prompt 错指过这里，已修
+
+2. **热点聚合 tab 复核**（task 3，零代码改动）
+   - CLAUDE.md 原第 354 行那条 TODO "/topics 热点聚合是 mock" 是**过期描述**
+   - 实地核查：`app/api/topics/trending/route.ts` + `lib/prompts/topic-trending.ts` 已接通真 Claude（走 `crawled_articles` 表 → TF-IDF 算关键词 → Claude 合并出题路径）
+   - 文档更新为已接，task 关闭
+
+3. **配图自动接进 draft 流**（task 2）
+   - `components/compose/ImagePanel.tsx` 加 `autoStart?: boolean` prop + `autoStartedRef` 防重复触发 + runAuto 改 useCallback
+   - `app/compose/page.tsx` 顶部 import ImagePanel；Step 7 占位 Panel（原文案"配图能力由独立模块负责…"）换成真 `<ImagePanel articleContent={draftMd} fingerprintId={按 weight 排序取主博主} autoStart />`
+   - **不动** `/api/images/auto`（POST 已够用，不需要加 GET 端点）/ schema / 其他组件
+   - Agent B 原设想"加 GET 端点 + 受控模式 + 改 ImagePanel 核心"被精简掉
+
+4. **列表页 `/fingerprints` 加快捷删除**（task 5）
+   - 新建 `app/fingerprints/VersionFingerprintCard.tsx`（client 组件）：包卡 + 右上角 hover 出现的小垃圾桶（默认 opacity:0）+ 两段式确认（红色条覆盖卡顶，"再点一次删除" / "取消"，3 秒自动撤回）+ `router.refresh()`
+   - `app/fingerprints/page.tsx` VersionsView 里 inline `<Link className="fp-card">` 换成 `<VersionFingerprintCard />`，AuthorsView **不动**（按博主聚合删整个博主是不同语义，留作另一个 feature）
+   - `app/globals.css` 加 `.fp-card-wrap` / `.fp-card-trash` / `.fp-card-confirm` / `.fp-card-confirm-yes` / `.fp-card-confirm-no` / `.fp-card-error`
+   - 复用现有 `DELETE /api/fingerprint/v3/[id]` 级联删 5 张表，**不动 API**
+
+5. **多平台一次出 N 个版本**（task 4，最大一件）
+   - **关键决策**（楠拍板）：
+     - N 平台勾选入口在 Step 1（路径 A）：主卡保留单选作为"主平台 + 主画像"，主卡下加 chip 多选行；主平台默认勾且不可取消；非主平台走 generic **不挑站点画像**
+     - outline **完全共享**（路径 a）：按主平台生成一份，draft 时各平台 article prompt 自行压缩 / 扩张
+     - 服务端**串行**而非并发（决策 5）：本机 Claude 是 Pro 订阅，并发会撞限速
+   - **draft route**（`app/api/compose/draft/route.ts`）：
+     - 入参加 `platforms: PlatformKey[]`（默认 `[target_platform ?? 'wechat']`，单平台等同改动前）
+     - 服务端按数组顺序循环 streamClaude，每平台显式 `timeoutMs: 240_000`
+     - SSE 协议：`open { platforms[] }` → `platform_start { platform }` → `delta { platform, delta }` → `platform_done { platform, content_md, word_count }` → `done { versions, all_word_count, errors }` / `error { platform?, message }`
+     - 单平台失败不阻断后续（continue + push errors[]）
+     - 客户端 AbortController 一次切所有平台
+     - 落库：主平台 content_md + 其它平台 dict 形态 `{ [platform]: md }` 进 `articles.refine_versions_json`
+   - **compose page**（`app/compose/page.tsx`）：
+     - Step 1 加 chip 多选行「ALSO PUBLISH TO · 顺手出这些版本」，主平台 chip disabled + 灰底 + "主" mono label；提示"这次会写 N 份正文 · 串行生成"
+     - Step 6 改 tabbed：顶部 tab bar 每平台一条，状态纯文字 "排队中" / "流式中" / "已完成 N 字"（禁 emoji）；每平台独立 scroll 容器 `display:none` 切换不丢已流内容；左侧 sticky 大纲只对 active tab 高亮；切到未开始 tab 显示陪伴文案"轮到这条排队中，到它了再开始"
+     - 状态机重构：删除单 `draftMd` state，改用 `draftMap: Partial<Record<PlatformKey, DraftEntry>>` + useMemo 派生
+     - Step 7 直接命中 `refineMap` 缓存（draft 完成时把所有平台版本批量塞入），没缓存才回退调 refine（保留 refine 兜底）
+   - **单平台路径退化等同改动前**——只勾主平台时 UI / API / SSE / 落库都一致
+
+### 本轮 commit 拆分（拟）
+- `feat(compose):` 多平台 N 个版本 + 配图接入 draft 流（compose 路径两件事 page.tsx 改动密不可分，合并 commit）
+- `feat(fingerprints):` 列表页 versions 视图加快捷删除
+- `docs:` CLAUDE.md 补 2026-05-27 一轮 + 修正过期 TODO（v3.3 验证 ✅ / 热点聚合 ✅ / 多平台 ✅ / 配图 ✅）
+
+### 本轮已知 tech debt / 边界 case
+- 🟡 **`articles.refine_versions_json` 列双格式**：draft route 写 dict（`{ [platform]: md }`），refine route 写 array（refine 历史追加）。两边各自 own 暂不冲突，但日后历史详情页 / `/api/articles/[id]/diff` 若要读这列需先 detect 是 dict 还是 array
+- 🟡 **多平台中止后只能整批重跑**：Step 6 "重新生成" 从头跑全部平台，没做"只重跑失败的"局部重试
+- 🟡 **v3.3 视觉对比仍未做**（CLAUDE.md 第 360 行）：用同一题材 + v3.3 升级后的指纹生成一篇，跟之前那篇"KPI 是合同"对比纵深 / 物件类比 / 结构差异
+
+### Agent 协作的几条经验
+- **agent 改文件被沙箱拒了 Edit 权限**——主线程直接接手是最快路径，但消耗主上下文。如果主上下文充裕、改动面小，接手；否则重派 agent 让楠在权限窗口点允许
+- **agent prompt 里要写"遇到不确定停下来问，别瞎拍板"**——agent D 就是这样发现 Step 1 单选这个前置 gap 的，5 个决策一次性回报，节省了瞎做被推倒重来的时间
+- **SendMessage 工具在当前环境没有**——无法续 agent 上下文，只能新派一个 agent 并把所有调查结果 + 决策一次性塞进 prompt（self-contained）
+- **指纹三字段写在顶层** 这种事实，agent prompt 里错指位置的话 agent 也会跟着错——CLAUDE.md 已是 truth-of-source，prompt 里别复述位置而是让 agent 自己读
 
 ---
 
@@ -351,15 +417,15 @@ v3.3 升级 prompt 后，老 v3 指纹的 fingerprint_json 没有 structure_repe
 - 🟡 小红书的 search/profile 在 easyapi actor 上返空数组（评分 1.3/5），所以全切到 zhorex/rednote-xiaohongshu-scraper
 
 ### 还在写的功能
-- 🟡 `/topics` 选题中心的"热点聚合"tab 是 mock 数据（[app/topics/page.tsx](app/topics/page.tsx)）—— Claude 真调还没接
+- ✅ `/topics` 选题中心的"热点聚合"tab 已接 Claude 真调（[app/api/topics/trending/route.ts](app/api/topics/trending/route.ts) + [lib/prompts/topic-trending.ts](lib/prompts/topic-trending.ts)）：读本地 `crawled_articles` → TF-IDF 算关键词 → Claude 合并出题。2026-05-27 复核确认
 - 🟡 配图自动打标的 Claude 调用尚未接（[lib/images/](lib/images/) 只扫描，未分类）
 - 🟡 跨平台改写 [app/authors/[id]/optimize/page.tsx](app/authors/[id]/optimize/page.tsx) 走 v3 的 cross_platform_report，UI 完成度约 70%
 
 ### v3.3 验证 / 后续（2026-05-26）
-- 🟡 **v3.3 端到端验证未跑通**：思敏学姐指纹（17 篇样本）已 force_rerun 三次：第一次 stage2 超时 180s（已修，stage2 拉到 480s）、第二次 stage2 JSON 解析失败（已修，加 repair retry）、第三次正在跑 / 已完成但未读结果。需要确认 fingerprint_json 真的写进了 structure_repertoire / depth_pattern / analogy_bank
+- ✅ **v3.3 端到端验证通过**（2026-05-27 复核）：思敏学姐指纹（id `x6xiH7pG20ytvU`）顶层三字段都已就位 —— `structure_repertoire`（dominant=problem_solution，4 种结构带 execution_traits）/ `depth_pattern`（average_layers=4，6 条 drilling_phrases）/ `analogy_bank`（15 个物件级类比，全具象无抽象隐喻）。**注意**：这三字段写在 fingerprint_json **顶层**，不是 platform_fingerprints[平台] 下——读取时别走平台节点
 - 🟡 **v3.3 视觉对比未做**：理想做法是用同一题材（"努力越努力越穷"）+ v3.3 升级后的指纹生成一次，跟之前那篇"KPI 是合同"对比纵深 / 物件类比 / 结构差异
-- 🟡 **多平台一次出 N 个版本**：楠确认要做但未启动。需要：把 outline 共享，draft 按平台轮询 / 并发；前端 step 6 改成 tabbed 多版本预览
-- 🟡 **配图自动接进 draft 流**：素材库代码已就绪，只需在 draft 完成后 hook 一次 `/api/images/auto`
+- ✅ **多平台一次出 N 个版本**（2026-05-27 落地）：Step 1 主卡保留单选作"主平台/主画像"，下加 chip 多选「顺手出这些版本」；outline 完全共享按主平台生成；draft route 服务端按 `platforms[]` **串行**循环 streamClaude（避免本机 Claude 订阅并发限速），SSE 协议带 `open / platform_start / delta{platform,delta} / platform_done{platform,content_md,word_count} / done{versions,errors} / error{platform?,message}`；Step 6 改 tabbed，每平台独立 scroll 容器（display:none 切换不丢已流内容），状态文字"排队中/流式中/已完成 N 字"无 emoji；Step 7 直接命中 `refineMap` 缓存不再调 refine。**单平台路径退化等同改动前**。**已知边界**：`articles.refine_versions_json` 列 draft 写 dict 形态（`{[platform]: md}`）、refine route 写 array 形态——两边各自 own 暂不冲突，但日后历史详情页 / diff API 若要读这列需先 detect 是 dict 还是 array
+- ✅ **配图自动接进 draft 流**（2026-05-27 落地）：`components/compose/ImagePanel.tsx` 加 `autoStart?: boolean` prop + useEffect + `autoStartedRef` 防重复触发；`app/compose/page.tsx` Step 7 占位 Panel 换成真 `<ImagePanel articleContent={draftMd} fingerprintId={按 weight 排序取主博主} autoStart />`。复用现有 `/api/images/auto` POST，不需要新加端点 / 不动 schema
 
 ### 已知非阻塞问题
 - 🟡 dev server 跑着时**不要跑 `npm run build`**——会污染 `.next/` 导致老 dev 进程 ENOENT chunk。要 build 先 kill dev

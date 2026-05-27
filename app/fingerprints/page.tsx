@@ -6,6 +6,7 @@ import {
   type FingerprintListItem,
 } from '@/lib/fingerprint-queries';
 import { AuthorCard } from '@/components/authors/AuthorCard';
+import { VersionFingerprintCard } from './VersionFingerprintCard';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -138,25 +139,17 @@ function VersionsView() {
       {items.map((fp, i) => {
         const gradient = AVATAR_GRADIENTS[i % AVATAR_GRADIENTS.length];
         return (
-          <Link key={fp.id} href={`/fingerprints/${fp.id}`} className="fp-card">
-            <div
-              className="fp-avatar"
-              style={gradient ? { background: gradient } : undefined}
-            >
-              {fp.avatarChar}
-            </div>
-            <h3 className="fp-name">{fp.authorName}</h3>
-            <p className="fp-stats">
-              {fp.platform || '未指定'} · {fp.studied} 篇 ·{' '}
-              {formatDate(fp.lastUsedAt ?? fp.createdAt)}
-            </p>
-            <div className="fp-radar">
-              <div className="fp-bar lang" style={{ height: `${fp.radar.lang}%` }} />
-              <div className="fp-bar struct" style={{ height: `${fp.radar.struct}%` }} />
-              <div className="fp-bar topic" style={{ height: `${fp.radar.topic}%` }} />
-              <div className="fp-bar visual" style={{ height: `${fp.radar.visual}%` }} />
-            </div>
-          </Link>
+          <VersionFingerprintCard
+            key={fp.id}
+            id={fp.id}
+            authorName={fp.authorName}
+            avatarChar={fp.avatarChar}
+            platformText={fp.platform || '未指定'}
+            studied={fp.studied}
+            dateText={formatDate(fp.lastUsedAt ?? fp.createdAt)}
+            radar={fp.radar}
+            gradient={gradient}
+          />
         );
       })}
       <Link href="/fingerprints/new" className="fp-card add-card">

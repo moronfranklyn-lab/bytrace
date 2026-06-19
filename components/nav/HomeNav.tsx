@@ -15,6 +15,7 @@ const LINKS: Array<{ href: string; label: string; match: string }> = [
   { href: '/sites', label: '站点画像', match: '/sites' },
   { href: '/recipes', label: '风格配方', match: '/recipes' },
   { href: '/topics', label: '选题中心', match: '/topics' },
+  { href: '/research', label: '深度调研', match: '/research' },
   { href: '/articles', label: '历史文章', match: '/articles' },
 ];
 

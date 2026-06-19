@@ -1,6 +1,8 @@
 import Database from 'better-sqlite3';
 import { mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { ensureCriticRunsTable } from '@/lib/schema-additions-critic';
+import { ensureResearchTables } from '@/lib/schema-additions-research';
 
 /**
  * 单例 SQLite 连接。
@@ -443,6 +445,12 @@ export function getDb(): Database.Database {
 
   // v3.2 · 风格配方（用户挑碎片组成 platform 专属配方）（幂等）
   ensureStyleRecipesTable(db);
+
+  // v3.4 · Reflection Loop · critic 评分记录（幂等）
+  ensureCriticRunsTable(db);
+
+  // v4 · 深度调研流程 · 报告 + 每轮起草/审查记录（幂等）
+  ensureResearchTables(db);
 
   _db = db;
   return db;

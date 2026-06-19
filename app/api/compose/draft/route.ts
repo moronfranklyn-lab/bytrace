@@ -1,7 +1,8 @@
 import { NextRequest } from 'next/server';
 import { nanoid } from 'nanoid';
-import { streamClaude } from '@/lib/claude';
+import { streamClaude, ARTICLE_MODEL } from '@/lib/claude';
 import { buildArticlePrompt } from '@/lib/prompts/article';
+import { buildRewriteHintBlock } from '@/lib/prompts/critic';
 import {
   buildFingerprintMetaMap,
   type Composition,
@@ -12,6 +13,13 @@ import { getDb } from '@/lib/db';
 import { ensureComposeColumns } from '@/lib/compose-schema';
 import { createSseStream, stripMarkdownFence } from '@/lib/sse';
 import { isValidPlatformKey, type PlatformKey } from '@/lib/platforms';
+import {
+  CRITIC_MAX_ATTEMPTS,
+  CRITIC_PASS_THRESHOLD,
+  pickBestRun,
+  runSingleCritic,
+  type CriticRunRecord,
+} from '@/lib/critic';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -32,6 +40,12 @@ interface IncomingPayload {
   platforms?: string[];
   /** v3.3：目标站点画像 id；传了就把站点画像注入主平台 article prompt（非主平台不挑站点画像，按决策 1） */
   target_site_id?: string;
+  /**
+   * v3.4 · Reflection Loop 开关。
+   * - true（默认）：草稿落地后跑 critic，不达标则带 hint 重写，最多 2 次
+   * - false：完全跳过 critic，等同 v3.3 行为。给"有/无 critic 对比评测"用
+   */
+  use_critic?: boolean;
 }
 
 interface SiteProfileRow {
@@ -161,6 +175,8 @@ export async function POST(req: NextRequest) {
   if (!outline) {
     return jsonError('大纲缺失或格式不对');
   }
+  // v3.4：critic 默认开启，前端可以通过 use_critic: false 显式关掉（评测模式）
+  const useCritic = body.use_critic !== false;
 
   // ---- 主平台解析 ----
   let primaryPlatform: PlatformKey | null = null;
@@ -260,6 +276,8 @@ export async function POST(req: NextRequest) {
     // 收集每平台产出
     const perPlatformContent = new Map<PlatformKey, string>();
     const errors: Array<{ platform: PlatformKey; message: string }> = [];
+    // v3.4：每平台的 critic 历次评分（落库 + best-of-N 兜底用）
+    const perPlatformCriticRuns = new Map<PlatformKey, CriticRunRecord[]>();
 
     for (let i = 0; i < platformList.length; i += 1) {
       if (abortSignal.aborted) break;
@@ -276,31 +294,147 @@ export async function POST(req: NextRequest) {
         is_main: isMain,
       });
 
-      const prompt = buildArticlePrompt(idea, composition, fpMap, outline, platform, siteCtxForThis);
+      // ===== v3.4 Reflection Loop =====
+      // 流程：写草稿 → critic 评分 → 不达标 + 还有次数 → 带 hint 重写 → 直到 pass 或用完。
+      // useCritic=false 时退化为"只跑 1 轮，不评分"——评测对照组。
+      const maxAttempts = useCritic ? CRITIC_MAX_ATTEMPTS : 1;
+      const runsForThisPlatform: CriticRunRecord[] = [];
+      let lastDraftMd = '';
+      let platformErrored = false;
 
-      let raw = '';
-      try {
-        raw = await streamClaude(prompt, {
-          signal: abortSignal,
-          timeoutMs: PER_PLATFORM_TIMEOUT_MS,
-          onChunk: (text) => send('delta', { platform, delta: text }),
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        if (abortSignal.aborted) break;
+
+        // 第二次开始：告诉前端清掉当前 tab 内容，准备接收重写后的 delta
+        if (attempt > 1) {
+          send('rewrite_start', {
+            platform,
+            attempt,
+            reason: runsForThisPlatform[runsForThisPlatform.length - 1]?.result.rewrite_hint ?? '',
+          });
+        }
+
+        // 构造本轮 prompt：第一次走原 article prompt；之后把 critic hint 注入 idea 段
+        const ideaForThisAttempt =
+          attempt === 1
+            ? idea
+            : `${idea}\n\n${buildRewriteHintBlock(
+                runsForThisPlatform[runsForThisPlatform.length - 1].result,
+                attempt,
+              )}`;
+        const prompt = buildArticlePrompt(
+          ideaForThisAttempt,
+          composition,
+          fpMap,
+          outline,
+          platform,
+          siteCtxForThis,
+        );
+
+        let raw = '';
+        try {
+          raw = await streamClaude(prompt, {
+            model: ARTICLE_MODEL, // 正文走 Sonnet 4.6 降 AI 味（outline/critic 仍用默认 Opus 4.8）
+            signal: abortSignal,
+            timeoutMs: PER_PLATFORM_TIMEOUT_MS,
+            onChunk: (text) => send('delta', { platform, delta: text, attempt }),
+          });
+        } catch (err) {
+          const message = (err as Error).message || '模型那边没回来';
+          errors.push({ platform, message });
+          send('error', { platform, message, phase: 'claude', attempt });
+          platformErrored = true;
+          break;
+        }
+
+        const contentMd = stripMarkdownFence(raw);
+        lastDraftMd = contentMd;
+
+        // 没开 critic：直接落库走人
+        if (!useCritic) break;
+
+        // 跑 critic（同步等结果，避免落库时还没评完）
+        send('critic_start', { platform, attempt });
+        const critic = await runSingleCritic(
+          contentMd,
+          composition,
+          fpMap,
+          outline,
+          abortSignal,
+        );
+
+        if (!critic.result) {
+          // critic 自己挂了——fail-open：把本稿当作"未评估"，跳出循环用原稿落库
+          send('critic_error', {
+            platform,
+            attempt,
+            message: critic.error ?? 'critic 未知错误',
+            elapsed_ms: critic.elapsed_ms,
+          });
+          break;
+        }
+
+        const record: CriticRunRecord = {
+          attempt,
+          draft_md: contentMd,
+          result: critic.result,
+          elapsed_ms: critic.elapsed_ms,
+        };
+        runsForThisPlatform.push(record);
+
+        send('critic', {
+          platform,
+          attempt,
+          total: critic.result.total,
+          passed: critic.result.passed,
+          scores: critic.result.scores,
+          weakest: critic.result.weakest,
+          rewrite_hint: critic.result.rewrite_hint,
+          elapsed_ms: critic.elapsed_ms,
+          threshold: CRITIC_PASS_THRESHOLD,
         });
-      } catch (err) {
-        // 单平台失败不阻断后续（决策 5）
-        const message = (err as Error).message || '模型那边没回来';
-        errors.push({ platform, message });
-        send('error', { platform, message, phase: 'claude' });
+
+        // 通过阈值 → 直接走
+        if (critic.result.passed) break;
+        // 还有重试机会 → 继续循环
+        // 用完次数 → 走 best-of-N 兜底（在循环外）
+      }
+
+      if (platformErrored) {
         if (abortSignal.aborted) break;
         continue;
       }
 
-      const contentMd = stripMarkdownFence(raw);
-      perPlatformContent.set(platform, contentMd);
+      // Best-of-N 兜底：critic 用完次数仍没过阈值时，挑总分最高的那稿落库
+      let finalContentMd = lastDraftMd;
+      let finalAttempt = runsForThisPlatform.length;
+      if (useCritic && runsForThisPlatform.length > 0) {
+        const lastRun = runsForThisPlatform[runsForThisPlatform.length - 1];
+        if (!lastRun.result.passed) {
+          const best = pickBestRun(runsForThisPlatform);
+          if (best) {
+            finalContentMd = best.draft_md;
+            finalAttempt = best.attempt;
+            send('critic_best_of_n', {
+              platform,
+              picked_attempt: best.attempt,
+              picked_total: best.result.total,
+              all_attempts: runsForThisPlatform.length,
+              threshold: CRITIC_PASS_THRESHOLD,
+            });
+          }
+        }
+      }
+
+      perPlatformContent.set(platform, finalContentMd);
+      perPlatformCriticRuns.set(platform, runsForThisPlatform);
       send('platform_done', {
         platform,
-        content_md: contentMd,
-        word_count: countWords(contentMd),
+        content_md: finalContentMd,
+        word_count: countWords(finalContentMd),
         is_main: isMain,
+        critic_final_attempt: finalAttempt,
+        critic_runs_count: runsForThisPlatform.length,
       });
     }
 
@@ -358,6 +492,69 @@ export async function POST(req: NextRequest) {
           try { upFp.run(sel.fingerprint_id); } catch {/* ignore */}
           try { upAuthor.run(now, sel.author_id); } catch {/* ignore */}
         }
+
+        // v3.4 · critic 评分入库（每平台每次 attempt 一行）
+        // UPSERT 语义：(article_id, platform, attempt) 主键冲突时覆盖
+        // —— 评测重跑时不会因为旧记录阻塞
+        if (perPlatformCriticRuns.size > 0) {
+          const insertCritic = db.prepare(`
+            INSERT INTO critic_runs (
+              article_id, platform, attempt,
+              structure_score, structure_reason,
+              depth_score, depth_reason,
+              analogy_score, analogy_reason,
+              punchline_score, punchline_reason,
+              taboo_score, taboo_reason,
+              total_score, passed, weakest, rewrite_hint, elapsed_ms, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(article_id, platform, attempt) DO UPDATE SET
+              structure_score = excluded.structure_score,
+              structure_reason = excluded.structure_reason,
+              depth_score = excluded.depth_score,
+              depth_reason = excluded.depth_reason,
+              analogy_score = excluded.analogy_score,
+              analogy_reason = excluded.analogy_reason,
+              punchline_score = excluded.punchline_score,
+              punchline_reason = excluded.punchline_reason,
+              taboo_score = excluded.taboo_score,
+              taboo_reason = excluded.taboo_reason,
+              total_score = excluded.total_score,
+              passed = excluded.passed,
+              weakest = excluded.weakest,
+              rewrite_hint = excluded.rewrite_hint,
+              elapsed_ms = excluded.elapsed_ms,
+              created_at = excluded.created_at
+          `);
+          for (const [platform, runs] of perPlatformCriticRuns.entries()) {
+            for (const r of runs) {
+              try {
+                insertCritic.run(
+                  articleId,
+                  platform,
+                  r.attempt,
+                  r.result.scores.structure.score,
+                  r.result.scores.structure.reason,
+                  r.result.scores.depth.score,
+                  r.result.scores.depth.reason,
+                  r.result.scores.analogy.score,
+                  r.result.scores.analogy.reason,
+                  r.result.scores.punchline.score,
+                  r.result.scores.punchline.reason,
+                  r.result.scores.taboo.score,
+                  r.result.scores.taboo.reason,
+                  r.result.total,
+                  r.result.passed ? 1 : 0,
+                  r.result.weakest,
+                  r.result.rewrite_hint,
+                  r.elapsed_ms,
+                  now,
+                );
+              } catch {
+                // critic 入库失败不影响主流程
+              }
+            }
+          }
+        }
       } else {
         // 主平台失败的极端情况：不落库，让前端拿到 error 自己处理
       }
@@ -376,6 +573,36 @@ export async function POST(req: NextRequest) {
     }
     const allWordCount = Object.values(allVersions).reduce((s, md) => s + countWords(md), 0);
 
+    // v3.4：critic 汇总
+    let criticSummary: {
+      use_critic: boolean;
+      total_runs: number;
+      total_elapsed_ms: number;
+      passed_platforms: number;
+      best_of_n_platforms: number;
+    } | null = null;
+    if (useCritic) {
+      let totalRuns = 0;
+      let totalElapsed = 0;
+      let passedPlatforms = 0;
+      let bestOfNPlatforms = 0;
+      for (const runs of perPlatformCriticRuns.values()) {
+        totalRuns += runs.length;
+        totalElapsed += runs.reduce((s, r) => s + r.elapsed_ms, 0);
+        if (runs.length === 0) continue;
+        const last = runs[runs.length - 1];
+        if (last.result.passed) passedPlatforms += 1;
+        else bestOfNPlatforms += 1;
+      }
+      criticSummary = {
+        use_critic: true,
+        total_runs: totalRuns,
+        total_elapsed_ms: totalElapsed,
+        passed_platforms: passedPlatforms,
+        best_of_n_platforms: bestOfNPlatforms,
+      };
+    }
+
     send('done', {
       article_id: articleId,
       title: finalTitle,
@@ -387,6 +614,8 @@ export async function POST(req: NextRequest) {
       versions: allVersions,
       all_word_count: allWordCount,
       errors,
+      // v3.4：critic 评测汇总（关闭时为 null）
+      critic_summary: criticSummary,
     });
   }, req.signal);
 }

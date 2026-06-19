@@ -275,10 +275,33 @@ export default function ComposePage() {
    * 单平台路径下，platforms 长度 = 1，行为退化等同现状。
    */
   type DraftPhase = 'pending' | 'streaming' | 'done' | 'error';
+  // v3.4 · critic 维度分（前端展示用）
+  interface CriticScores {
+    structure?: number;
+    depth?: number;
+    analogy?: number;
+    punchline?: number;
+    taboo?: number;
+  }
   interface DraftEntry {
     status: DraftPhase;
     content_md: string;
     error?: string;
+    // v3.4 · Reflection Loop 状态
+    // critic_attempt：当前是第几次 attempt（1 起算；草稿生成中）
+    // critic_phase：'writing' | 'reviewing' | 'rewriting' | 'best_of_n'（仅 UI 展示用）
+    // last_critic：最近一次 critic 评分结果（用于显示评分卡片）
+    critic_attempt?: number;
+    critic_phase?: 'writing' | 'reviewing' | 'rewriting' | 'best_of_n';
+    last_critic?: {
+      total: number;
+      passed: boolean;
+      threshold: number;
+      scores: CriticScores;
+      weakest: string | null;
+      rewrite_hint: string;
+    };
+    critic_runs_count?: number;
   }
   const [draftPlatforms, setDraftPlatforms] = useState<PlatformKey[]>([]);
   const [draftMainPlatform, setDraftMainPlatform] = useState<PlatformKey | null>(null);
@@ -313,6 +336,27 @@ export default function ComposePage() {
   }, []);
 
   const ideaWordCount = useMemo(() => countWords(idea), [idea]);
+
+  // 从 /research 跳过来时：把调研报告作为素材注入 customNotes（一次性，读完即清）
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem('research_to_compose');
+      if (!raw) return;
+      sessionStorage.removeItem('research_to_compose');
+      const payload = JSON.parse(raw) as { topic?: string; md?: string };
+      if (payload.md) {
+        const block = `---\n# 调研报告 · 写作弹药（来自深度调研）\n${payload.md}`;
+        setCustomNotes((prev) => {
+          const stripped = prev.replace(/\n*---\n# 调研报告 ·[\s\S]*$/, '').trim();
+          return stripped ? `${stripped}\n\n${block}` : block;
+        });
+      }
+      if (payload.topic) setIdea((prev) => (prev ? prev : payload.topic ?? ''));
+    } catch {
+      /* ignore */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 当 targetPlatform 改变时，把预览平台同步过去
   useEffect(() => {
@@ -575,19 +619,31 @@ export default function ComposePage() {
           const p = d.platform;
           setDraftMap((m) => ({
             ...m,
-            [p]: { status: 'streaming', content_md: '', error: undefined },
+            [p]: {
+              status: 'streaming',
+              content_md: '',
+              error: undefined,
+              critic_attempt: 1,
+              critic_phase: 'writing',
+            },
           }));
           // 切到刚开始流的 tab（仅在用户还没主动切走时）
           setActiveDraftTab((cur) => cur === null ? p : cur);
         } else if (evt.event === 'delta') {
-          const d = evt.data as { platform?: PlatformKey; delta?: string };
+          const d = evt.data as { platform?: PlatformKey; delta?: string; attempt?: number };
           if (!d.platform || !d.delta) continue;
           const p = d.platform;
           setDraftMap((m) => {
             const prev = m[p] ?? { status: 'streaming' as DraftPhase, content_md: '' };
             return {
               ...m,
-              [p]: { ...prev, status: 'streaming', content_md: prev.content_md + d.delta },
+              [p]: {
+                ...prev,
+                status: 'streaming',
+                content_md: prev.content_md + d.delta,
+                critic_attempt: d.attempt ?? prev.critic_attempt ?? 1,
+                critic_phase: 'writing',
+              },
             };
           });
           // 自动滚到底（仅对当前 active tab 滚）
@@ -595,13 +651,118 @@ export default function ComposePage() {
             const el = draftScrollRefs.current[p];
             if (el) el.scrollTop = el.scrollHeight;
           });
+        } else if (evt.event === 'critic_start') {
+          // v3.4：草稿写完，开始评审。让 UI 显示"评审中"。
+          const d = evt.data as { platform?: PlatformKey; attempt?: number };
+          if (!d.platform) continue;
+          const p = d.platform;
+          setDraftMap((m) => {
+            const prev = m[p] ?? { status: 'streaming' as DraftPhase, content_md: '' };
+            return {
+              ...m,
+              [p]: { ...prev, critic_phase: 'reviewing', critic_attempt: d.attempt ?? 1 },
+            };
+          });
+        } else if (evt.event === 'critic') {
+          // v3.4：拿到本次评分结果
+          const d = evt.data as {
+            platform?: PlatformKey;
+            attempt?: number;
+            total?: number;
+            passed?: boolean;
+            threshold?: number;
+            scores?: Record<string, { score?: number }>;
+            weakest?: string | null;
+            rewrite_hint?: string;
+          };
+          if (!d.platform) continue;
+          const p = d.platform;
+          const compactScores: CriticScores = {};
+          if (d.scores && typeof d.scores === 'object') {
+            for (const k of ['structure', 'depth', 'analogy', 'punchline', 'taboo'] as const) {
+              const v = d.scores[k]?.score;
+              if (typeof v === 'number') compactScores[k] = v;
+            }
+          }
+          setDraftMap((m) => {
+            const prev = m[p] ?? { status: 'streaming' as DraftPhase, content_md: '' };
+            return {
+              ...m,
+              [p]: {
+                ...prev,
+                last_critic: {
+                  total: d.total ?? 0,
+                  passed: !!d.passed,
+                  threshold: d.threshold ?? 20,
+                  scores: compactScores,
+                  weakest: d.weakest ?? null,
+                  rewrite_hint: d.rewrite_hint ?? '',
+                },
+                critic_runs_count: (prev.critic_runs_count ?? 0) + 1,
+              },
+            };
+          });
+        } else if (evt.event === 'rewrite_start') {
+          // v3.4：上一稿不达标，开始重写。清掉当前 tab 内容，准备接收新 delta。
+          const d = evt.data as { platform?: PlatformKey; attempt?: number };
+          if (!d.platform) continue;
+          const p = d.platform;
+          setDraftMap((m) => {
+            const prev = m[p] ?? { status: 'streaming' as DraftPhase, content_md: '' };
+            return {
+              ...m,
+              [p]: {
+                ...prev,
+                content_md: '',
+                status: 'streaming',
+                critic_phase: 'rewriting',
+                critic_attempt: d.attempt ?? (prev.critic_attempt ?? 1) + 1,
+              },
+            };
+          });
+        } else if (evt.event === 'critic_best_of_n') {
+          // v3.4：N 次仍未达标，落库挑了最高分那稿。打个 phase 状态让 UI 友好提示。
+          const d = evt.data as { platform?: PlatformKey };
+          if (!d.platform) continue;
+          const p = d.platform;
+          setDraftMap((m) => {
+            const prev = m[p] ?? { status: 'streaming' as DraftPhase, content_md: '' };
+            return { ...m, [p]: { ...prev, critic_phase: 'best_of_n' } };
+          });
+        } else if (evt.event === 'critic_error') {
+          // v3.4：critic 自己挂了，fail-open——不阻塞主流程，前端给出陪伴文案
+          const d = evt.data as { platform?: PlatformKey; message?: string };
+          if (!d.platform) continue;
+          const p = d.platform;
+          setDraftMap((m) => {
+            const prev = m[p] ?? { status: 'streaming' as DraftPhase, content_md: '' };
+            return {
+              ...m,
+              [p]: {
+                ...prev,
+                critic_phase: undefined,
+              },
+            };
+          });
+          showToast(`「${p}」这一稿评审环节卡了一下，先把原稿留着，回头再看看`);
         } else if (evt.event === 'platform_done') {
-          const d = evt.data as { platform?: PlatformKey; content_md?: string };
+          const d = evt.data as {
+            platform?: PlatformKey;
+            content_md?: string;
+            critic_final_attempt?: number;
+            critic_runs_count?: number;
+          };
           if (!d.platform) continue;
           const p = d.platform;
           setDraftMap((m) => ({
             ...m,
-            [p]: { status: 'done', content_md: d.content_md ?? (m[p]?.content_md ?? '') },
+            [p]: {
+              ...(m[p] ?? { content_md: '' }),
+              status: 'done',
+              content_md: d.content_md ?? (m[p]?.content_md ?? ''),
+              critic_phase: undefined,
+              critic_runs_count: d.critic_runs_count ?? m[p]?.critic_runs_count,
+            },
           }));
         } else if (evt.event === 'done') {
           const d = evt.data as {
@@ -1660,10 +1821,29 @@ function Step5Outline({
 
 // ---------- Step 6 · 流式正文（多平台 tab） ----------
 type Step6DraftPhase = 'pending' | 'streaming' | 'done' | 'error';
+interface Step6CriticScores {
+  structure?: number;
+  depth?: number;
+  analogy?: number;
+  punchline?: number;
+  taboo?: number;
+}
 interface Step6DraftEntry {
   status: Step6DraftPhase;
   content_md: string;
   error?: string;
+  // v3.4 · Reflection Loop 实时状态
+  critic_attempt?: number;
+  critic_phase?: 'writing' | 'reviewing' | 'rewriting' | 'best_of_n';
+  last_critic?: {
+    total: number;
+    passed: boolean;
+    threshold: number;
+    scores: Step6CriticScores;
+    weakest: string | null;
+    rewrite_hint: string;
+  };
+  critic_runs_count?: number;
 }
 
 function Step6Draft({
@@ -1779,11 +1959,22 @@ function Step6Draft({
             const isActive = p === activeTab;
             const isMain = p === mainPlatform;
             const wordCount = entry ? countWords(entry.content_md) : 0;
-            const statusLabel =
-              status === 'pending' ? '排队中'
-              : status === 'streaming' ? `流式中 · ${wordCount} 字`
-              : status === 'done' ? `已完成 ${wordCount} 字`
-              : '失败';
+            // v3.4：critic_phase 优先级高于 status，让 UI 显示更具体的阶段
+            const cPhase = entry?.critic_phase;
+            const cAttempt = entry?.critic_attempt;
+            let statusLabel: string;
+            if (status === 'pending') statusLabel = '排队中';
+            else if (status === 'error') statusLabel = '失败';
+            else if (cPhase === 'reviewing') statusLabel = `第 ${cAttempt ?? 1} 稿 · 评审中`;
+            else if (cPhase === 'rewriting') statusLabel = `第 ${cAttempt ?? 2} 稿 · 重写中`;
+            else if (cPhase === 'best_of_n') statusLabel = `已完成 ${wordCount} 字 · 兜底择优`;
+            else if (status === 'streaming') {
+              statusLabel = cAttempt && cAttempt > 1
+                ? `第 ${cAttempt} 稿 · ${wordCount} 字`
+                : `流式中 · ${wordCount} 字`;
+            }
+            else if (status === 'done') statusLabel = `已完成 ${wordCount} 字`;
+            else statusLabel = '';
             return (
               <button
                 key={p}
@@ -1870,6 +2061,15 @@ function Step6Draft({
               }}
               style={isActive ? undefined : { display: 'none' }}
             >
+              {/* v3.4 · critic 评分卡：有评分历史的 tab 上方常驻一张 */}
+              {entry?.last_critic && (
+                <CriticScoreCard
+                  critic={entry.last_critic}
+                  attempt={entry.critic_attempt ?? 1}
+                  runsCount={entry.critic_runs_count ?? 1}
+                  phase={entry.critic_phase}
+                />
+              )}
               {status === 'error' && entry?.error ? (
                 <Banner kind="error" title={`「${PLATFORM_TRAITS.find((x) => x.key === p)?.name ?? p}」这一条卡住了`}>
                   {entry.error}
@@ -1908,6 +2108,117 @@ function Step6Draft({
         </div>
       </div>
     </section>
+  );
+}
+
+// ---------- Critic 评分卡 ----------
+// v3.4 · 把 reflection loop 的评分可视化。挂在 Step 6 每个 platform tab 的正文上方。
+function CriticScoreCard({
+  critic, attempt, runsCount, phase,
+}: {
+  critic: {
+    total: number;
+    passed: boolean;
+    threshold: number;
+    scores: Step6CriticScores;
+    weakest: string | null;
+    rewrite_hint: string;
+  };
+  attempt: number;
+  runsCount: number;
+  phase?: 'writing' | 'reviewing' | 'rewriting' | 'best_of_n';
+}) {
+  // 状态短语：critic_phase 优先，没传时根据 passed 显示
+  let statusLine: string;
+  if (phase === 'rewriting') statusLine = `不达标，正在带 hint 重写第 ${attempt} 稿…`;
+  else if (phase === 'reviewing') statusLine = '评审中…';
+  else if (phase === 'best_of_n') statusLine = `用完次数 · 落库挑了 ${runsCount} 稿里总分最高的那稿`;
+  else if (critic.passed) statusLine = '过审 · 已通过质量阈值';
+  else statusLine = '未达阈值';
+
+  const dimensions: Array<{ key: keyof Step6CriticScores; label: string }> = [
+    { key: 'structure', label: '结构' },
+    { key: 'depth', label: '深度' },
+    { key: 'analogy', label: '类比' },
+    { key: 'punchline', label: '金句' },
+    { key: 'taboo', label: '禁忌' },
+  ];
+
+  return (
+    <div
+      style={{
+        marginBottom: 14,
+        padding: '12px 14px',
+        border: '1px solid var(--border)',
+        borderLeft: '3px solid ' + (critic.passed ? 'var(--success, #2c8a4a)' : 'var(--accent)'),
+        borderRadius: 8,
+        background: 'var(--surface)',
+        fontSize: 13,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 8 }}>
+        <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}>
+          第 {attempt} 稿评分 · {critic.total} / 25
+        </span>
+        <span
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+            color: 'var(--text-muted)',
+            letterSpacing: '0.03em',
+          }}
+        >
+          阈值 {critic.threshold}
+        </span>
+        <span style={{ flex: 1 }} />
+        <span
+          style={{
+            fontSize: 12,
+            color: critic.passed ? 'var(--success, #2c8a4a)' : 'var(--text-muted)',
+          }}
+        >
+          {statusLine}
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: critic.rewrite_hint ? 10 : 0 }}>
+        {dimensions.map(({ key, label }) => {
+          const s = critic.scores[key];
+          const isWeakest = critic.weakest === key;
+          return (
+            <span
+              key={key}
+              style={{
+                padding: '3px 10px',
+                borderRadius: 12,
+                fontSize: 12,
+                fontFamily: 'var(--font-mono)',
+                border: '1px solid ' + (isWeakest ? 'var(--accent)' : 'var(--border)'),
+                background: isWeakest ? 'var(--accent-soft)' : 'var(--surface-white)',
+                color: typeof s === 'number' && s < 3 ? 'var(--accent)' : 'var(--text)',
+                letterSpacing: '0.02em',
+              }}
+            >
+              {label} {typeof s === 'number' ? s : '-'} / 5
+            </span>
+          );
+        })}
+      </div>
+
+      {critic.rewrite_hint && !critic.passed && (
+        <p
+          style={{
+            margin: 0,
+            fontSize: 12,
+            color: 'var(--text-muted)',
+            lineHeight: 1.6,
+          }}
+        >
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, marginRight: 6 }}>HINT</span>
+          {critic.rewrite_hint}
+        </p>
+      )}
+    </div>
   );
 }
 

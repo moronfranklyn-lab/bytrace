@@ -1,6 +1,6 @@
 # AutoArticle · 项目构造记录
 
-> 写给下一个 Claude 看。也写给楠几周后回来看。
+> 写给下一个 Codex 看。也写给楠几周后回来看。
 > 最后更新：2026-05-27（v3.3 收尾 · 多平台 N 个版本 + 配图自动接入 + 列表页快捷删除 + v3.3 端到端验证通过）
 > 历史里程碑：
 >   2026-05-25 · v3.1 自动分类 + OpenCLI 接入 + 反爬约束 v2
@@ -14,8 +14,8 @@
 
 **关键约束（违反会被楠纠正）**：
 
-- ✅ 走本机 Claude Code CLI（child_process）—— **不接 Anthropic API、不带 key、不联网调 LLM**
-- ✅ Claude CLI 必须用 `--output-format stream-json --include-partial-messages` 才会真流式。**别再用裸 `claude -p`**，会等整篇生成完才一次性返回（100+ 秒静默）
+- ✅ 走本机 Codex CLI（child_process）—— **不接 Anthropic API、不带 key、不联网调 LLM**
+- ✅ Codex CLI 必须用 `--output-format stream-json --include-partial-messages` 才会真流式。**别再用裸 `Codex -p`**，会等整篇生成完才一次性返回（100+ 秒静默）
 - ✅ 数据全留本机 SQLite —— **不上云、不做 SaaS**
 - ⚠️ **公众号 / B 站 / 小红书 / 抖音爬取规则**：见下方「反爬与账号边界 v2」专节，主通道走 OpenCLI 借登录浏览器
 - ❌ **文章正文严禁 emoji 和装饰符号**（写作工具气质要"克制"）
@@ -38,8 +38,8 @@
    - **重要事实纠正**：这三字段写在 fingerprint_json **顶层**，不在 platform_fingerprints[平台] 下——读取时别走平台节点。原 agent prompt 错指过这里，已修
 
 2. **热点聚合 tab 复核**（task 3，零代码改动）
-   - CLAUDE.md 原第 354 行那条 TODO "/topics 热点聚合是 mock" 是**过期描述**
-   - 实地核查：`app/api/topics/trending/route.ts` + `lib/prompts/topic-trending.ts` 已接通真 Claude（走 `crawled_articles` 表 → TF-IDF 算关键词 → Claude 合并出题路径）
+   - AGENTS.md 原第 354 行那条 TODO "/topics 热点聚合是 mock" 是**过期描述**
+   - 实地核查：`app/api/topics/trending/route.ts` + `lib/prompts/topic-trending.ts` 已接通真 Codex（走 `crawled_articles` 表 → TF-IDF 算关键词 → Codex 合并出题路径）
    - 文档更新为已接，task 关闭
 
 3. **配图自动接进 draft 流**（task 2）
@@ -58,7 +58,7 @@
    - **关键决策**（楠拍板）：
      - N 平台勾选入口在 Step 1（路径 A）：主卡保留单选作为"主平台 + 主画像"，主卡下加 chip 多选行；主平台默认勾且不可取消；非主平台走 generic **不挑站点画像**
      - outline **完全共享**（路径 a）：按主平台生成一份，draft 时各平台 article prompt 自行压缩 / 扩张
-     - 服务端**串行**而非并发（决策 5）：本机 Claude 是 Pro 订阅，并发会撞限速
+     - 服务端**串行**而非并发（决策 5）：本机 Codex 是 Pro 订阅，并发会撞限速
    - **draft route**（`app/api/compose/draft/route.ts`）：
      - 入参加 `platforms: PlatformKey[]`（默认 `[target_platform ?? 'wechat']`，单平台等同改动前）
      - 服务端按数组顺序循环 streamClaude，每平台显式 `timeoutMs: 240_000`
@@ -76,18 +76,18 @@
 ### 本轮 commit 拆分（拟）
 - `feat(compose):` 多平台 N 个版本 + 配图接入 draft 流（compose 路径两件事 page.tsx 改动密不可分，合并 commit）
 - `feat(fingerprints):` 列表页 versions 视图加快捷删除
-- `docs:` CLAUDE.md 补 2026-05-27 一轮 + 修正过期 TODO（v3.3 验证 ✅ / 热点聚合 ✅ / 多平台 ✅ / 配图 ✅）
+- `docs:` AGENTS.md 补 2026-05-27 一轮 + 修正过期 TODO（v3.3 验证 ✅ / 热点聚合 ✅ / 多平台 ✅ / 配图 ✅）
 
 ### 本轮已知 tech debt / 边界 case
 - 🟡 **`articles.refine_versions_json` 列双格式**：draft route 写 dict（`{ [platform]: md }`），refine route 写 array（refine 历史追加）。两边各自 own 暂不冲突，但日后历史详情页 / `/api/articles/[id]/diff` 若要读这列需先 detect 是 dict 还是 array
 - 🟡 **多平台中止后只能整批重跑**：Step 6 "重新生成" 从头跑全部平台，没做"只重跑失败的"局部重试
-- 🟡 **v3.3 视觉对比仍未做**（CLAUDE.md 第 360 行）：用同一题材 + v3.3 升级后的指纹生成一篇，跟之前那篇"KPI 是合同"对比纵深 / 物件类比 / 结构差异
+- 🟡 **v3.3 视觉对比仍未做**（AGENTS.md 第 360 行）：用同一题材 + v3.3 升级后的指纹生成一篇，跟之前那篇"KPI 是合同"对比纵深 / 物件类比 / 结构差异
 
 ### Agent 协作的几条经验
 - **agent 改文件被沙箱拒了 Edit 权限**——主线程直接接手是最快路径，但消耗主上下文。如果主上下文充裕、改动面小，接手；否则重派 agent 让楠在权限窗口点允许
 - **agent prompt 里要写"遇到不确定停下来问，别瞎拍板"**——agent D 就是这样发现 Step 1 单选这个前置 gap 的，5 个决策一次性回报，节省了瞎做被推倒重来的时间
 - **SendMessage 工具在当前环境没有**——无法续 agent 上下文，只能新派一个 agent 并把所有调查结果 + 决策一次性塞进 prompt（self-contained）
-- **指纹三字段写在顶层** 这种事实，agent prompt 里错指位置的话 agent 也会跟着错——CLAUDE.md 已是 truth-of-source，prompt 里别复述位置而是让 agent 自己读
+- **指纹三字段写在顶层** 这种事实，agent prompt 里错指位置的话 agent 也会跟着错——AGENTS.md 已是 truth-of-source，prompt 里别复述位置而是让 agent 自己读
 
 ---
 
@@ -119,7 +119,7 @@
    - 修"样本 20 篇 / 共 40 篇"显示 bug：source_article_count 写真实 COUNT
 
 5. **streamClaude 真流式 + 全 UI 改造**（`28bf105`）
-   - **lib/claude.ts 重写**：用 `--output-format stream-json --include-partial-messages`，解析 `content_block_delta` 喂给 onChunk。从"100+ 秒静默后一次性返回"变成"5 秒第一个 chunk"
+   - **lib/Codex.ts 重写**：用 `--output-format stream-json --include-partial-messages`，解析 `content_block_delta` 喂给 onChunk。从"100+ 秒静默后一次性返回"变成"5 秒第一个 chunk"
    - 指纹详情：AuthorMetaEditor（单击改名 / 改平台，自定义平台名走独立 input）+ DeleteFingerprintButton（两段式确认级联删除）+ AddFingerprintSamplesPanel（贴 URL 加样本）
    - 修"v3 指纹四维度全空"bug：v3 schema 把字段嵌在 `platform_fingerprints[平台]` 下，老 UI 只读顶层
    - 新博主拆解页接 Stage 0 SSE 进度 + 批量贴 URL + 自动 expand index URL（带 cardsRef 修闭包）
@@ -279,7 +279,7 @@ L5 Lib          lib/*.ts                 通用工具，纯函数（日期、文
 | `GET/PATCH/DELETE /api/recipes/[id]` | [app/api/recipes/[id]/route.ts](app/api/recipes/[id]/route.ts) | 配方详情（join 碎片完整信息）/ 编辑 / 删除 |
 | `GET /api/strategies/search` | [app/api/strategies/search/route.ts](app/api/strategies/search/route.ts) | **跨博主策略碎片检索**（按 category / tag / platform 过滤，v3.1 新）|
 | `GET/POST /api/articles/[id]` | [app/api/articles/[id]/route.ts](app/api/articles/[id]/route.ts) | 历史文章 |
-| `POST /api/articles/[id]/diff` | [app/api/articles/[id]/diff/route.ts](app/api/articles/[id]/diff/route.ts) | **平台版本差异摘要**（Claude 算 from→to 改写差异，带 article_diffs 表缓存）|
+| `POST /api/articles/[id]/diff` | [app/api/articles/[id]/diff/route.ts](app/api/articles/[id]/diff/route.ts) | **平台版本差异摘要**（Codex 算 from→to 改写差异，带 article_diffs 表缓存）|
 | `GET/POST /api/images/auto` | [app/api/images/auto/route.ts](app/api/images/auto/route.ts) | 自动配图（本地素材库优先 + Unsplash 补） |
 | `GET /api/apify/usage` | [app/api/apify/usage/route.ts](app/api/apify/usage/route.ts) | Apify 余额 + 最近 20 run（前端 status pill 用） |
 | `GET/PATCH /api/settings` | [app/api/settings/route.ts](app/api/settings/route.ts) | 偏好设置（`default_theme` / `apify_token` 白名单） |
@@ -291,7 +291,7 @@ L5 Lib          lib/*.ts                 通用工具，纯函数（日期、文
 | 路径 | 职责 | 注意事项 |
 |---|---|---|
 | [lib/db.ts](lib/db.ts) | SQLite 单例 + 各表幂等扩展（PRAGMA + ALTER） | **加新字段必须用 `ensureXxxColumn(db)` 形式幂等扩**，不能直接改 schema.sql。本轮新增的所有 ensureXxx 已合并 |
-| [lib/claude.ts](lib/claude.ts) | `spawn('claude', ['-p', '--output-format', 'stream-json', '--input-format', 'stream-json', '--include-partial-messages', '--verbose'])` + 行 JSON 解析 + 默认 180s 超时 | **核心改造**：v3.3 必须用 stream-json，否则不流式。重要调用要显式传 `timeoutMs`（stage2: 480s, stage3 / category: 360s）|
+| [lib/Codex.ts](lib/Codex.ts) | `spawn('Codex', ['-p', '--output-format', 'stream-json', '--input-format', 'stream-json', '--include-partial-messages', '--verbose'])` + 行 JSON 解析 + 默认 180s 超时 | **核心改造**：v3.3 必须用 stream-json，否则不流式。重要调用要显式传 `timeoutMs`（stage2: 480s, stage3 / category: 360s）|
 | [lib/sse.ts](lib/sse.ts) | SSE 编码工具（fetch + ReadableStream，**不用 EventSource**） | 流式输出走这个 |
 | [lib/composition.ts](lib/composition.ts) | 文章排版（3 平台 layout：standard/lively/minimal） | 公众号 HTML / 知乎 Markdown / 通用 |
 | [lib/platforms.ts](lib/platforms.ts) | 平台元数据 | 视频平台（B站/抖音/YouTube）已从 PLATFORMS 中隐藏，仅保留 adapter 兼容存量 |
@@ -301,7 +301,7 @@ L5 Lib          lib/*.ts                 通用工具，纯函数（日期、文
 | [lib/authors/avatar.ts](lib/authors/avatar.ts) | `pickAvatarChar(name)`：首个 CJK / 首字母大写 / 兜底 'A' | v3 POST route + `/api/authors/:id` PATCH 共用 |
 | [lib/apify/usage.ts](lib/apify/usage.ts) | Apify 账户/余额/recent runs 统一查询 | `ACTOR_ID_TO_LABEL` 映射 actor ID → 中文标签 |
 | [lib/search/](lib/search/) | 博主名搜索（DDG HTML / Google CSE） | `assessRisk` 判定平台是否反爬 |
-| [lib/prompts/](lib/prompts/) | Claude prompt 模板 | v3.3 关键改 stage1 / stage2 / outline / article / siteprofile，加了 fingerprint-v3-stage0.ts / fingerprint-v3-category.ts / diff.ts |
+| [lib/prompts/](lib/prompts/) | Codex prompt 模板 | v3.3 关键改 stage1 / stage2 / outline / article / siteprofile，加了 fingerprint-v3-stage0.ts / fingerprint-v3-category.ts / diff.ts |
 | [lib/images/](lib/images/) | 本地素材库扫描 + Unsplash 适配 | |
 | [lib/fingerprint-queries.ts](lib/fingerprint-queries.ts) | 指纹 DB 查询 | |
 | [lib/format-cost.ts](lib/format-cost.ts) | `formatUsd(n)`：<1 三位小数 / ≥1 两位 | Apify 用量显示统一走这个 |
@@ -361,8 +361,8 @@ lib/crawler/
 
 ## 关键决策的「为什么」（避免重蹈覆辙）
 
-### 1. 为什么不接 Anthropic API，走本机 Claude CLI？
-楠没付 API key 钱，但订阅了 Claude Pro。`claude -p "<prompt>"` 通过本机订阅算费用。代价：要 spawn 子进程 + 流式接 stdout + 180s 超时管理。代码在 [lib/claude.ts](lib/claude.ts)。  
+### 1. 为什么不接 Anthropic API，走本机 Codex CLI？
+楠没付 API key 钱，但订阅了 Codex Pro。`Codex -p "<prompt>"` 通过本机订阅算费用。代价：要 spawn 子进程 + 流式接 stdout + 180s 超时管理。代码在 [lib/Codex.ts](lib/Codex.ts)。  
 **不要换成 @anthropic-ai/sdk**——会变成 SaaS 模式且让楠付双份钱。
 
 ### 2. 为什么公众号默认不爬？
@@ -387,7 +387,7 @@ lib/crawler/
 
 ### 7. 为什么有 v1 / v2 / v3 三套指纹拆解？
 迭代痕迹：
-- v1 单次 Claude 调用，拆 12 维（最老）
+- v1 单次 Codex 调用，拆 12 维（最老）
 - v2 加跨篇综合 + strategies 表
 - v3 多 agent 并行 + 平台分组 + 跨平台对比报告（**当前主版本**）
 
@@ -402,9 +402,9 @@ UI 默认走 v3。v1/v2 的代码不要删——老指纹用 `version_schema` �
 ### 10. 为什么所有的运行时是 nodejs 不是 edge？
 better-sqlite3 是原生模块，跑不了 edge runtime。**每个 route.ts 顶部都要写 `export const runtime = 'nodejs'`**。
 
-### 11. 为什么 streamClaude 要用 stream-json 而不是裸 `claude -p`？
-楠在 Step 6 流式正文页看到"已 0 字"等了 100+ 秒——根因是 `claude -p` 默认**不流式**，整篇答完才一口气吐 stdout。换成 `--output-format stream-json --input-format stream-json --include-partial-messages` 后，**5-6 秒就有第一个 chunk**，按 `content_block_delta > text_delta.text` 解析喂给 onChunk。  
-对外契约不变（onChunk 仍是 plain text，返回值是 assembled text），所有调用方零迁移。代码在 [lib/claude.ts](lib/claude.ts)。
+### 11. 为什么 streamClaude 要用 stream-json 而不是裸 `Codex -p`？
+楠在 Step 6 流式正文页看到"已 0 字"等了 100+ 秒——根因是 `Codex -p` 默认**不流式**，整篇答完才一口气吐 stdout。换成 `--output-format stream-json --input-format stream-json --include-partial-messages` 后，**5-6 秒就有第一个 chunk**，按 `content_block_delta > text_delta.text` 解析喂给 onChunk。  
+对外契约不变（onChunk 仍是 plain text，返回值是 assembled text），所有调用方零迁移。代码在 [lib/Codex.ts](lib/Codex.ts)。
 
 ### 12. 为什么 v3 指纹要有 Stage 0 自动分类 + 类别细分？
 楠观察："一些博主会对热点追踪，可能写科技 / 经济 / 知识等多种类，希望能针对性抓取策略，又能跨博主综合分析"。  
@@ -443,14 +443,14 @@ v3.3 升级 prompt 后，老 v3 指纹的 fingerprint_json 没有 structure_repe
 - 🟡 小红书的 search/profile 在 easyapi actor 上返空数组（评分 1.3/5），所以全切到 zhorex/rednote-xiaohongshu-scraper
 
 ### 还在写的功能
-- ✅ `/topics` 选题中心的"热点聚合"tab 已接 Claude 真调（[app/api/topics/trending/route.ts](app/api/topics/trending/route.ts) + [lib/prompts/topic-trending.ts](lib/prompts/topic-trending.ts)）：读本地 `crawled_articles` → TF-IDF 算关键词 → Claude 合并出题。2026-05-27 复核确认
-- 🟡 配图自动打标的 Claude 调用尚未接（[lib/images/](lib/images/) 只扫描，未分类）
+- ✅ `/topics` 选题中心的"热点聚合"tab 已接 Codex 真调（[app/api/topics/trending/route.ts](app/api/topics/trending/route.ts) + [lib/prompts/topic-trending.ts](lib/prompts/topic-trending.ts)）：读本地 `crawled_articles` → TF-IDF 算关键词 → Codex 合并出题。2026-05-27 复核确认
+- 🟡 配图自动打标的 Codex 调用尚未接（[lib/images/](lib/images/) 只扫描，未分类）
 - 🟡 跨平台改写 [app/authors/[id]/optimize/page.tsx](app/authors/[id]/optimize/page.tsx) 走 v3 的 cross_platform_report，UI 完成度约 70%
 
 ### v3.3 验证 / 后续（2026-05-26）
 - ✅ **v3.3 端到端验证通过**（2026-05-27 复核）：思敏学姐指纹（id `x6xiH7pG20ytvU`）顶层三字段都已就位 —— `structure_repertoire`（dominant=problem_solution，4 种结构带 execution_traits）/ `depth_pattern`（average_layers=4，6 条 drilling_phrases）/ `analogy_bank`（15 个物件级类比，全具象无抽象隐喻）。**注意**：这三字段写在 fingerprint_json **顶层**，不是 platform_fingerprints[平台] 下——读取时别走平台节点
 - 🟡 **v3.3 视觉对比未做**：理想做法是用同一题材（"努力越努力越穷"）+ v3.3 升级后的指纹生成一次，跟之前那篇"KPI 是合同"对比纵深 / 物件类比 / 结构差异
-- ✅ **多平台一次出 N 个版本**（2026-05-27 落地）：Step 1 主卡保留单选作"主平台/主画像"，下加 chip 多选「顺手出这些版本」；outline 完全共享按主平台生成；draft route 服务端按 `platforms[]` **串行**循环 streamClaude（避免本机 Claude 订阅并发限速），SSE 协议带 `open / platform_start / delta{platform,delta} / platform_done{platform,content_md,word_count} / done{versions,errors} / error{platform?,message}`；Step 6 改 tabbed，每平台独立 scroll 容器（display:none 切换不丢已流内容），状态文字"排队中/流式中/已完成 N 字"无 emoji；Step 7 直接命中 `refineMap` 缓存不再调 refine。**单平台路径退化等同改动前**。**已知边界**：`articles.refine_versions_json` 列 draft 写 dict 形态（`{[platform]: md}`）、refine route 写 array 形态——两边各自 own 暂不冲突，但日后历史详情页 / diff API 若要读这列需先 detect 是 dict 还是 array
+- ✅ **多平台一次出 N 个版本**（2026-05-27 落地）：Step 1 主卡保留单选作"主平台/主画像"，下加 chip 多选「顺手出这些版本」；outline 完全共享按主平台生成；draft route 服务端按 `platforms[]` **串行**循环 streamClaude（避免本机 Codex 订阅并发限速），SSE 协议带 `open / platform_start / delta{platform,delta} / platform_done{platform,content_md,word_count} / done{versions,errors} / error{platform?,message}`；Step 6 改 tabbed，每平台独立 scroll 容器（display:none 切换不丢已流内容），状态文字"排队中/流式中/已完成 N 字"无 emoji；Step 7 直接命中 `refineMap` 缓存不再调 refine。**单平台路径退化等同改动前**。**已知边界**：`articles.refine_versions_json` 列 draft 写 dict 形态（`{[platform]: md}`）、refine route 写 array 形态——两边各自 own 暂不冲突，但日后历史详情页 / diff API 若要读这列需先 detect 是 dict 还是 array
 - ✅ **配图自动接进 draft 流**（2026-05-27 落地）：`components/compose/ImagePanel.tsx` 加 `autoStart?: boolean` prop + useEffect + `autoStartedRef` 防重复触发；`app/compose/page.tsx` Step 7 占位 Panel 换成真 `<ImagePanel articleContent={draftMd} fingerprintId={按 weight 排序取主博主} autoStart />`。复用现有 `/api/images/auto` POST，不需要新加端点 / 不动 schema
 
 ### 已知非阻塞问题
@@ -465,7 +465,7 @@ v3.3 升级 prompt 后，老 v3 指纹的 fingerprint_json 没有 structure_repe
 ### 启动
 **双击桌面** `~/Desktop/AutoArticle.command`（已配 chmod +x）。脚本会：
 1. 检测端口 3100 是否被占（被占就让你选用旧的 / 杀掉重启 / 退出）
-2. 检测 Node / Claude CLI / Apify token / 数据库 / node_modules
+2. 检测 Node / Codex CLI / Apify token / 数据库 / node_modules
 3. `npm run dev -- -p 3100` 起服务
 4. 服务就绪后自动开浏览器到 http://localhost:3100
 
@@ -489,7 +489,7 @@ APIFY_TOKEN=               # **当前已注释**，要用需重启用
 
 | 工具 | 路径 | 用途 |
 |---|---|---|
-| Claude CLI | `/Users/nan/.npm-global/bin/claude` | 生成文章命脉，没有等于工具瘫痪 |
+| Codex CLI | `/Users/nan/.npm-global/bin/Codex` | 生成文章命脉，没有等于工具瘫痪 |
 | Node.js | `node --version` ≥ 18 | Next.js 运行时 |
 | SQLite3 | 系统自带 | DB 检查（启动脚本要用） |
 
@@ -545,10 +545,10 @@ gh repo create autoarticle --private --source=. --push
 2. **多 agent 并行做独立任务**是楠确认过的偏好——不要等楠让你才并行
 3. **决策点用 AskUserQuestion 摆卡片**，不要在 chat 里列编号问题
 4. **称呼楠**——每条消息开头叫"楠"
-5. **写代码前先想 cost**——Apify 烧钱过历史，加 Apify 调用前要算 per-run 成本；加 Claude 调用前要估时间和配额（单 stage2 重跑 ~5-8 分钟）
+5. **写代码前先想 cost**——Apify 烧钱过历史，加 Apify 调用前要算 per-run 成本；加 Codex 调用前要估时间和配额（单 stage2 重跑 ~5-8 分钟）
 6. **改 schema 用 ALTER 幂等**——不要碰 schema.sql 顶层
 7. **STATUS-*.md 是旧 agent 的工作记录**——读不读看时间够不够，不必每次都翻
-8. **任何流式调用都用 streamClaude**——别再 spawn 裸 `claude -p`，会卡 100+ 秒静默
+8. **任何流式调用都用 streamClaude**——别再 spawn 裸 `Codex -p`，会卡 100+ 秒静默
 9. **重负载 prompt 显式传 timeoutMs**——stage2 / category profile / 跨平台对比这种带 5-20 篇样本的 prompt，180s 默认不够
 10. **改 v3 prompt 前看 stage1 / stage2 / outline / article 是不是已经在抓 / 用某个字段**——v3.3 的"结构能力 / 物件类比"链路已经从样本拆解一路串到 article 落笔，别在中间断一环
 11. **力争"具象 > 抽象"**——这是写作工具的灵魂底线。模型偶尔会犯"用抽象隐喻偷懒"的毛病，prompt 要硬规定物件级

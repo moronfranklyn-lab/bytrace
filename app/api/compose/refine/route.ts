@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { streamClaude } from '@/lib/claude';
+import { streamClaude, ARTICLE_MODEL } from '@/lib/claude';
 import {
   buildRefinePrompt,
   extractCrossHintsFromFingerprints,
@@ -131,6 +131,7 @@ export async function POST(req: NextRequest) {
     let raw = '';
     try {
       raw = await streamClaude(prompt, {
+        model: ARTICLE_MODEL, // 润色走 Sonnet 4.6 降 AI 味
         signal: abortSignal,
         onChunk: (text) => send('chunk', { text }),
       });

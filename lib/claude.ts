@@ -4,6 +4,15 @@ import { existsSync } from 'node:fs';
 const FALLBACK_CLAUDE_PATH = '/Users/nan/.npm-global/bin/claude';
 const DEFAULT_TIMEOUT_MS = 180_000;
 
+/**
+ * 文章产出（正文 draft / 润色 refine）统一走 Sonnet 4.6。
+ * 起因：Opus 4.8 产出的文章「AI 味」偏浓，4.6 文风更自然（楠 2026-06 确认）。
+ * 锁完整 model id 不漂移；想跟随最新 sonnet 可改成别名 'sonnet'。
+ * 注意：大纲 outline（论证骨架）和评审 critic（质检）刻意不用这个 ——
+ * 它们要 4.8 的结构强度 / 评审严格度，调用处不传 model 即走 CLI 订阅默认。
+ */
+export const ARTICLE_MODEL = 'claude-sonnet-4-6';
+
 export interface StreamClaudeOptions {
   /** Called with every text delta as it streams in. */
   onChunk?: (text: string) => void;
@@ -13,6 +22,12 @@ export interface StreamClaudeOptions {
   timeoutMs?: number;
   /** Override the claude binary path (mostly for testing). */
   claudeBin?: string;
+  /**
+   * 指定调用的模型：别名（如 'sonnet'）或完整名（如 'claude-sonnet-4-6'）。
+   * 不传 → 走本机 CLI 订阅默认模型（当前 Opus 4.8）。
+   * 文章产出传 ARTICLE_MODEL 降 AI 味；分析类（outline / critic）不传。
+   */
+  model?: string;
 }
 
 /**
@@ -48,6 +63,7 @@ export function streamClaude(
     signal,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     claudeBin,
+    model,
   } = options;
 
   return new Promise<string>((resolve, reject) => {
@@ -66,6 +82,10 @@ export function streamClaude(
       '--include-partial-messages',
       '--verbose', // required by CLI when output-format is stream-json
     ];
+    // 指定模型时插 --model（文章产出走 Sonnet 4.6 降 AI 味；不传则用 CLI 订阅默认 = Opus 4.8）
+    if (model) {
+      cliArgs.push('--model', model);
+    }
 
     const trySpawn = (cmd: string): ChildProcessWithoutNullStreams => {
       return spawn(cmd, cliArgs, {

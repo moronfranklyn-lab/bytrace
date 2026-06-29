@@ -283,7 +283,7 @@ L5 Lib          lib/*.ts                 通用工具，纯函数（日期、文
 | `/strategies` | [app/strategies/page.tsx](app/strategies/page.tsx) | **策略侦察**：跨博主按 category / tag / platform 检索碎片（v3.1 新）|
 | `/authors` | [app/authors/page.tsx](app/authors/page.tsx) | 博主搜索/选择面板 |
 | `/authors/[id]` | [app/authors/[id]/page.tsx](app/authors/[id]/page.tsx) | 博主多平台对比 4-tab |
-| `/authors/[id]/optimize` | [app/authors/[id]/optimize/page.tsx](app/authors/[id]/optimize/page.tsx) | 跨平台改写优化 |
+| `/authors/[id]/optimize` | [app/authors/[id]/optimize/page.tsx](app/authors/[id]/optimize/page.tsx) | **优化指纹**：选 1-10 篇新样本 → 在现有指纹基础上输出 v+1（`OptimizeFlow`，含手动贴文）。**不是**跨平台改写（那在 `AuthorDetailV3` / v3 引擎的 cross_platform_report）|
 | `/sites` `/sites/[id]` `/sites/new` | [app/sites/](app/sites/) | 站点 × 板块 × 编辑画像。`/sites/[id]` 加 AddSamplesPanel 客户端组件 |
 | `/topics` | [app/topics/page.tsx](app/topics/page.tsx) | 选题中心（风格推荐 + 热点聚合两 tab） |
 | `/articles` `/articles/[id]` | [app/articles/](app/articles/) | 历史文章。新版按文章分组（不按博主），平台 chip 切换平台版本，调 `/api/articles/:id/diff` 显示 AI 改写差异 |
@@ -382,7 +382,7 @@ lib/crawler/
 | `site_articles` | ensureSiteArticlesTable | 站点画像 ↔ 已用样本关联（PRIMARY KEY: site_id, url_hash），含 iteration |
 | `article_diffs` | ensureArticleDiffsTable | 平台版本差异摘要缓存（PRIMARY KEY: article_id, from_platform, to_platform），按 hash 失效 |
 | `crawled_articles` | schema-additions.sql | 已爬过的文章正文（含 url_hash 去重）。加了 medium 列 |
-| `local_assets` | schema-additions-images.sql | 本地素材库（247 张配图扫描） |
+| `local_assets` | schema-additions-images.sql + `ensureLocalAssetsAiTaggedColumn` | 本地素材库扫描。`tags_json` / `visual_style` 扫描时是**启发式**打标（scanner 靠文件名/文件夹猜）；`ai_tagged=1` 表示已经过 [classify.ts](lib/images/classify.ts) Claude 真视觉分类。批量打标走 [scripts/tag-local-assets.ts](scripts/tag-local-assets.ts) |
 | `article_images` | schema-additions-images.sql | 文章 ↔ 图片关联 |
 | `articles` | schema-additions-compose.sql | 生成过的文章历史 |
 | `sites` | schema-additions-sites.sql | 站点 × 板块 × 编辑画像。加了 iteration_count 列 |
@@ -477,8 +477,8 @@ v3.3 升级 prompt 后，老 v3 指纹的 fingerprint_json 没有 structure_repe
 
 ### 还在写的功能
 - ✅ `/topics` 选题中心的"热点聚合"tab 已接 Claude 真调（[app/api/topics/trending/route.ts](app/api/topics/trending/route.ts) + [lib/prompts/topic-trending.ts](lib/prompts/topic-trending.ts)）：读本地 `crawled_articles` → TF-IDF 算关键词 → Claude 合并出题。2026-05-27 复核确认
-- 🟡 配图自动打标的 Claude 调用尚未接（[lib/images/](lib/images/) 只扫描，未分类）
-- 🟡 跨平台改写 [app/authors/[id]/optimize/page.tsx](app/authors/[id]/optimize/page.tsx) 走 v3 的 cross_platform_report，UI 完成度约 70%
+- ✅ **配图 Claude 视觉打标已接**（2026-06-29）：[lib/images/classify.ts](lib/images/classify.ts) `classifyImageWithClaude` spawn 一次 `claude -p "<prompt>" --allowedTools Read --add-dir <root>` 让 CLI 用 Read 工具真看图，分 截图/插画/数据图/照片/其他 + 抽 4-6 个内容标签，写回 `local_assets`（覆盖 visual_style + 并入 tags_json + 置 `ai_tagged=1`）。批量脚本 [scripts/tag-local-assets.ts](scripts/tag-local-assets.ts) 串行跑（订阅不并发）只挑 `ai_tagged=0` 的图，`--limit N` / `--all` / `--root` 可控。**为什么不复用 streamClaude**：streamClaude 是纯文本 stream-json 通道喂不进图，视觉分类必须让 CLI 挂 Read 工具读磁盘——所以单独 spawn 一次性短任务。fail-open：单张失败保留 scanner 启发式标不阻断。实测 ~14s/张
+- ✅ **`/authors/[id]/optimize` 实为「优化指纹」流程且已完整**（`OptimizeFlow` 517 行）——旧文档误标成"跨平台改写 70%"，已订正。真正的跨平台改写在 `AuthorDetailV3` / v3 引擎 cross_platform_report（完成度未单独复核）
 
 ### v3.3 验证 / 后续（2026-05-26）
 - ✅ **v3.3 端到端验证通过**（2026-05-27 复核）：思敏学姐指纹（id `x6xiH7pG20ytvU`）顶层三字段都已就位 —— `structure_repertoire`（dominant=problem_solution，4 种结构带 execution_traits）/ `depth_pattern`（average_layers=4，6 条 drilling_phrases）/ `analogy_bank`（15 个物件级类比，全具象无抽象隐喻）。**注意**：这三字段写在 fingerprint_json **顶层**，不是 platform_fingerprints[平台] 下——读取时别走平台节点

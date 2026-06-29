@@ -137,6 +137,21 @@ function ensureStrategyV3Columns(db: Database.Database) {
 }
 
 /**
+ * 给 local_assets 幂等补 ai_tagged 列。
+ * 0 = 扫描时的启发式打标（scanner.ts buildInitialTags / guessVisualStyle 猜的）；
+ * 1 = 已经过 Claude 视觉分类（classify.ts 真看图打的标）。
+ * 让批量打标脚本能只挑 ai_tagged=0 的图跑，不重复烧 Claude 配额。
+ */
+function ensureLocalAssetsAiTaggedColumn(db: Database.Database) {
+  const cols = db.prepare(`PRAGMA table_info(local_assets)`).all() as { name: string }[];
+  if (cols.length === 0) return; // 表还没建（schema-additions-images.sql 未跑），下次 getDb() 再补
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has('ai_tagged')) {
+    db.exec(`ALTER TABLE local_assets ADD COLUMN ai_tagged INTEGER DEFAULT 0`);
+  }
+}
+
+/**
  * Agent I · 给 crawled_articles 表幂等补 medium 列（区分文字/视频博主）。
  * crawled_articles 表由 schema-additions.sql 创建；老库（F0 写时）没有这个字段。
  * 没表就跳过，等 schema-additions.sql 先执行一次 CREATE。
@@ -455,6 +470,9 @@ export function getDb(): Database.Database {
 
   // v3.5 · compose 主流程的 Codex 联网搜集缓存（按 idea_hash 幂等）
   ensureGatherRunsTable(db);
+
+  // 配图视觉打标标志列：1 = 已经过 Claude 视觉分类（区别于扫描时的启发式打标）（幂等）
+  ensureLocalAssetsAiTaggedColumn(db);
 
   _db = db;
   return db;

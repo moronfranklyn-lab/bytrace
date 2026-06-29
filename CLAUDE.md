@@ -1,12 +1,14 @@
 # AutoArticle · 项目构造记录
 
 > 写给下一个 Claude 看。也写给楠几周后回来看。
-> 最后更新：2026-05-27（v3.3 收尾 · 多平台 N 个版本 + 配图自动接入 + 列表页快捷删除 + v3.3 端到端验证通过）
+> 最后更新：2026-06-29（v3.5 gather 事实底座落库 · 文档补记 v3.4 critic + Sonnet 4.6 切换两轮）
 > 历史里程碑：
 >   2026-05-25 · v3.1 自动分类 + OpenCLI 接入 + 反爬约束 v2
 >   2026-05-25 · v3.2 风格配方（策略碎片组合可命名 / 保存 / 复用）
 >   2026-05-26 · v3.3 结构能力（structure_repertoire / depth_pattern / analogy_bank）+ outline / article prompt 重写
 >   2026-05-27 · v3.3 收尾 + 多平台 compose（一次出 N 个版本 / Step 6 tabbed）+ 配图自动接入 draft 流 + 指纹列表页快捷删除
+>   2026-06-19 · v3.4 critic reflection loop（draft 后评分回炉 best-of-N）+ /research 深度调研节点 + 正文产出切 Sonnet 4.6
+>   2026-06-22 · v3.5 gather 事实底座（idea 确认即后台 codex 联网搜集素材注入正文）
 
 ## 这是什么
 
@@ -17,12 +19,43 @@
 - ✅ 走本机 Claude Code CLI（child_process）—— **不接 Anthropic API、不带 key、不联网调 LLM**
 - ✅ Claude CLI 必须用 `--output-format stream-json --include-partial-messages` 才会真流式。**别再用裸 `claude -p`**，会等整篇生成完才一次性返回（100+ 秒静默）
 - ✅ 数据全留本机 SQLite —— **不上云、不做 SaaS**
+- ✅ **模型分工（v3.4 起）**：正文 draft + refine 走 **Sonnet 4.6**（`ARTICLE_MODEL`，降 AI 味）；outline / critic / 分析类不传 model = CLI 订阅默认 **Opus 4.8**（要结构强度 / 评审严格度）。别把正文改回 Opus——是刻意为降 AI 味
 - ⚠️ **公众号 / B 站 / 小红书 / 抖音爬取规则**：见下方「反爬与账号边界 v2」专节，主通道走 OpenCLI 借登录浏览器
 - ❌ **文章正文严禁 emoji 和装饰符号**（写作工具气质要"克制"）
 - ❌ **不要做自定义颜色调节器**——只允许选默认主题
 - ✅ 文案语气**陪伴而非审判**："这次模型卡住了，我们换个角度再试一次" 不要 "生成失败"
 - ✅ **抽象论点必须配物件级类比**（v3.3 核心约束）：article prompt 强制让模型从博主 analogy_bank 里挑具象物件（"黄牛在天台抽烟" / "户口本进 iCloud"），禁止凭空造抽象隐喻（"如同登山"不算）
 - ✅ **每节正文首段必须回扣上节 thesis**（v3.3 核心约束）：避免"平铺列举式"伪深度，强制论证按因果链 / 双线对比 / 同心圆等形态走
+
+---
+
+## 2026-06-19 → 2026-06-29 这几轮做了什么（要点速览 · 文档补记）
+
+> 这几轮代码大多 6 月就落了，但文档一直停在 05-27。本次把三件事补进文档并把 v3.5 落库。
+
+### 1. v3.4 critic reflection loop（commit `4ecb5d8` · 2026-06-19）
+draft 生成后由 critic 打分，不达标带 hint 全文重写，best-of-N 兜底。
+- **文件**：[lib/critic.ts](lib/critic.ts)（编排：写草稿 → 评分 → 带 hint 重写 → 再评）/ [lib/prompts/critic.ts](lib/prompts/critic.ts)（评分 prompt + `CRITIC_MAX_ATTEMPTS` / `CRITIC_PASS_THRESHOLD` + `buildRewriteHintBlock`）/ [lib/schema-additions-critic.ts](lib/schema-additions-critic.ts)（`critic_runs` 表，挂进 `getDb()`）
+- **集成在 draft route**（[app/api/compose/draft/route.ts](app/api/compose/draft/route.ts)）：`use_critic` 默认 `true`，传 `false` 完全跳过（等同 v3.3，给"有/无 critic 对比评测"用）。每平台独立跑 critic 循环，SSE 加 `critic_start` / `critic_error` 等事件
+- **关键决策**（写在 lib/critic.ts 头注里）：① 全文重写而非按节修补（边界识别太脆）② 最多 2 次重写 = 3 次 critic（业界 reflection 上限）③ critic 失败 **fail-open** 不阻塞，用原稿落库 ④ critic 用更短超时 90s（只输出 JSON）
+- **模型分工**：critic 用默认 **Opus 4.8**（要评审严格度），不传 model
+
+### 2. /research 深度调研节点 + 正文切 Sonnet 4.6（commit `e1ff10e` · 2026-06-19）
+- /research 链路详见下方「深度调研流程（/research · v4）」专节（那节是这次一起补的）
+- **降 AI 味的模型切换**：[lib/claude.ts](lib/claude.ts) 加 `export const ARTICLE_MODEL = 'claude-sonnet-4-6'` + `streamClaude` 的 `model?` 选项（指定时插 `--model`）。**正文 draft + refine 润色走 Sonnet 4.6**（降 AI 味），**outline / critic / 分析类不传 model = CLI 订阅默认 Opus 4.8**（要结构强度 / 评审严格度）。对外契约不变，按调用处是否传 `model: ARTICLE_MODEL` 区分
+
+### 3. v3.5 gather 事实底座（commit `94e65dc` · 代码 2026-06-22，2026-06-29 落库）
+compose 主流程的"信息搜集"环节：idea 一确认就 fire-and-forget 后台调起 codex 联网搜集素材包，到 Step 5 outline 时多半已就绪，立刻给 outline / article prompt 喂事实弹药。
+- **文件**：[app/api/compose/gather/route.ts](app/api/compose/gather/route.ts)（SSE：`cached` / `started` / `progress` / `done` / `error`，GET 按 `idea_hash` 拉缓存）/ [lib/schema-additions-gather.ts](lib/schema-additions-gather.ts)（`gather_runs` 表，按 `idea_hash` 幂等，挂进 `getDb()`）
+- **为什么不复用 /research**：/research 跑完整 reflection loop（15-20 分钟出经审查成稿）；compose 只要"原始素材包"，只跑 1/4 链路。复用同一份 codex prompt `buildGatherPrompt`（[lib/prompts/research.ts](lib/prompts/research.ts)）保持事实抓取口径一致
+- **缓存**：按 `idea_hash = sha256(trim(idea)+'\n'+sourceHint).slice(0,16)` 幂等。同 idea 秒返缓存不烧 codex 配额；codex cwd 给 `tmpdir()` 中性目录（别让它读项目根 AGENTS.md 跑偏，与 /research 同约束）
+- **前端接线**（[app/compose/page.tsx](app/compose/page.tsx)）：`kickoffGather` 在 idea 确认时起跑 + `gatherCurrentIdeaRef` 防同 idea 重启 + AbortController 切换；**Step 5 outline「软等待」**——进 Step 5 时若 gather 还在跑就停在"等事实底座"面板，待完成或用户点"不等了"再触发 outline fetch；内联 `GatherStatusCard` 卡显示进度。outline / draft fetch 透传 `research_material`
+- **prompt 注入**（[lib/prompts/outline.ts](lib/prompts/outline.ts) / [lib/prompts/article.ts](lib/prompts/article.ts)）：`buildResearchMaterialBlock(ForArticle)` 把素材包作"事实底座"块拼进 prompt；**有素材包时强约束**：所有具体数字 / 人名 / 事件 / 引用必须来自素材包，禁止凭空编伪数字，没有就用"显著上升"定性描述。**空素材自动降级**，prompt 退化等同改动前
+- 🧪 **尚未端到端实测**：codex 联网搜集那段产出质量没在真实 compose 流程里验证过（见下方 TODO）
+
+### 本轮已知 tech debt / 边界
+- 🟡 **`research_material` 只透前端 state，不落 article 历史**：gather 素材进了 `gather_runs` 缓存，但生成的 article 没记"这篇用了哪份素材包"。日后要追溯"某篇正文的数字来自哪"得自己按 idea_hash 反查
+- 🟡 **gather 与多平台 N 版本的交互**：素材包是按 idea 一份，多平台共享同一份注入——符合预期，但没专门测过多平台 + gather 同开
 
 ---
 

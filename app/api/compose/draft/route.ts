@@ -46,6 +46,11 @@ interface IncomingPayload {
    * - false：完全跳过 critic，等同 v3.3 行为。给"有/无 critic 对比评测"用
    */
   use_critic?: boolean;
+  /**
+   * v3.5：codex 联网搜集的素材包（事实/数据/反方/来源）。
+   * 由前端从 /api/compose/gather 拿到后透传过来；空 = 不注入。
+   */
+  research_material?: string;
 }
 
 interface SiteProfileRow {
@@ -177,6 +182,11 @@ export async function POST(req: NextRequest) {
   }
   // v3.4：critic 默认开启，前端可以通过 use_critic: false 显式关掉（评测模式）
   const useCritic = body.use_critic !== false;
+  // v3.5：codex 搜集的素材包（事实底座）。前端从 /api/compose/gather 拿到后透传。
+  // 空 = 不注入，prompt 自动降级到 v3.4 行为。
+  const researchMaterial = typeof body.research_material === 'string'
+    ? body.research_material
+    : undefined;
 
   // ---- 主平台解析 ----
   let primaryPlatform: PlatformKey | null = null;
@@ -329,6 +339,7 @@ export async function POST(req: NextRequest) {
           outline,
           platform,
           siteCtxForThis,
+          researchMaterial,
         );
 
         let raw = '';

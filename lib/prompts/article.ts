@@ -26,6 +26,13 @@ export function buildArticlePrompt(
   outline: Outline,
   targetPlatformKey: PlatformKey | null = null,
   siteCtx: ArticleSiteContext | null = null,
+  /**
+   * v3.5：codex 联网搜出来的素材包。outline 用过同样的素材包了，
+   * 这里再喂一遍是因为 outline → article 是两次独立 LLM 调用，article 同样需要
+   * 拿到事实底座才能在正文里准确地写出数字 / 引用，而不是凭空编。
+   * 空 = 用户跳过 / 失败 / 没等到，prompt 自动降级。
+   */
+  researchMaterial?: string,
 ): string {
   const compositionSnippet = buildCompositionSystemSnippet(composition, fingerprints);
   const outlineSnippet = renderOutline(outline);
@@ -38,6 +45,8 @@ export function buildArticlePrompt(
   const siteBlock = buildSiteBlock(siteCtx);
   const analogyDensity = extractAnalogyDensity(siteCtx);
   const depthHint = extractDepthHint(siteCtx);
+  // v3.5：codex 搜来的素材包，作为正文事实底座
+  const materialBlock = buildResearchMaterialBlockForArticle(researchMaterial);
 
   const platformBlock = target
     ? `
@@ -63,7 +72,7 @@ ${platformExtra ? `\n# 博主对目标平台的适配提示\n\n${platformExtra}\
 # 选定的风格组合
 
 ${compositionSnippet}
-${structureBlock}${siteBlock}${platformBlock}
+${structureBlock}${siteBlock}${platformBlock}${materialBlock}
 # 作者的题材思路（背景理解，不要直接复读）
 
 ${(idea ?? '').trim()}
@@ -120,7 +129,7 @@ ${depthHint ? `11. 站点画像建议挖到「${depthHint}」的深度。如果�
 - 不要"首先 / 其次 / 最后"机械承接，按风格组合里指纹给的过渡句式来。
 - 不要复读大纲里的 bullet，要扩写成有血有肉的段落和案例。
 - 引用 / 数据如果不确定真实性，宁愿不写，也不要瞎编人名和数字。
-
+${researchMaterial && researchMaterial.trim() ? `- **本次有素材包**：所有具体数字 / 人名 / 事件 / 引用，**必须**来自上方"已搜集的素材包"，不要凭空编、不要做素材包里没有的"小幅润色"。素材包里给出来源 URL 的，在正文里可以**省略 URL**（公众号不挂外链），但事实要忠实。\n` : ''}
 # 文案温度
 
 错误、反例、争议处的语气保持"陪伴而非审判"。不要训诫读者，把读者当朋友。
@@ -224,4 +233,32 @@ function extractDepthHint(ctx: ArticleSiteContext | null): string | null {
   if (!ctx?.siteProfile) return null;
   const v = (ctx.siteProfile as { preferred_depth?: string }).preferred_depth;
   return typeof v === 'string' && v.trim() ? v.trim() : null;
+}
+
+/**
+ * v3.5：把 codex 联网搜来的素材包嵌进正文 prompt。
+ *
+ * 注意与 outline prompt 里那个同名 helper 的差异：
+ *   - outline 的 block 强调"骨架阶段就该挂事实"
+ *   - article 的 block 强调"正文里写的具体数字必须忠实，禁止自由发挥"
+ * 两段提醒口径要一致但侧重不同。
+ */
+function buildResearchMaterialBlockForArticle(material: string | undefined): string {
+  const trimmed = (material ?? '').trim();
+  if (!trimmed) return '';
+  return `
+# 已搜集的素材包（事实底座 · 正文写具体数字 / 引用时的唯一来源）
+
+下面这段是 codex 联网搜出来的硬料。正文里出现的每一个**具体数字 / 人名 / 公司案例 / 时间 / 引用原话**，**必须**能在这段素材里找到对应来源：
+
+\`\`\`
+${trimmed}
+\`\`\`
+
+写作时的边界：
+- 素材包里的事实 → 可以直接用，可以改写成更顺口的中文，**但数字 / 人名不要漂移**。
+- 素材包里的观点 → 写"X 在 Y 上说……"或"某厂商的自评数据显示……"时，明确归属，不要把观点包装成事实。
+- 素材包里没有的具体事实 → **禁止凭想象补**。宁可省掉那个数字，用"显著上升""明显下降"这种定性描述，也别瞎编"涨了 47%"这种伪数字。
+- 素材包标了"反方"或"争议"的内容 → 至少在一节正文里体现，不能装作没看见。
+`;
 }

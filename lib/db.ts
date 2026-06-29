@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { ensureCriticRunsTable } from '@/lib/schema-additions-critic';
+import { ensureGatherRunsTable } from '@/lib/schema-additions-gather';
 import { ensureResearchTables } from '@/lib/schema-additions-research';
 
 /**
@@ -451,6 +452,9 @@ export function getDb(): Database.Database {
 
   // v4 · 深度调研流程 · 报告 + 每轮起草/审查记录（幂等）
   ensureResearchTables(db);
+
+  // v3.5 · compose 主流程的 Codex 联网搜集缓存（按 idea_hash 幂等）
+  ensureGatherRunsTable(db);
 
   _db = db;
   return db;

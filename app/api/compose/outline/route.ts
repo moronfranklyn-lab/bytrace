@@ -16,6 +16,11 @@ interface IncomingPayload {
   target_platform?: string;
   /** 可选：用户在 Step 1 选了具体站点画像时传，prompt 会注入画像的结构/深度/类比偏好 */
   target_site_id?: string;
+  /**
+   * v3.5：codex 联网搜集的素材包（事实/数据/反方/来源）。
+   * 由前端从 /api/compose/gather 拿到后透传过来。空 = 用户跳过 / 没等到，prompt 自动降级。
+   */
+  research_material?: string;
 }
 
 interface SiteProfileRow {
@@ -105,10 +110,18 @@ export async function POST(req: NextRequest) {
   return createSseStream(async (send, _close, abortSignal) => {
     send('open', { ok: true });
 
-    const prompt = buildOutlinePrompt(idea, composition, fpMap, targetPlatform, {
-      siteLabel,
-      siteProfile,
-    });
+    const researchMaterial = typeof body.research_material === 'string'
+      ? body.research_material
+      : undefined;
+
+    const prompt = buildOutlinePrompt(
+      idea,
+      composition,
+      fpMap,
+      targetPlatform,
+      { siteLabel, siteProfile },
+      researchMaterial,
+    );
 
     let raw = '';
     try {

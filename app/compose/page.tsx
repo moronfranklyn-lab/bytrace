@@ -260,6 +260,33 @@ export default function ComposePage() {
   // 风格配方（选了配方 → 把碎片汇成文本注入 customNotes，让下游 prompt 接收到）
   const [selectedRecipeId, setSelectedRecipeId] = useState<string | null>(null);
 
+  // ===== v3.5 · 后台 codex 联网搜集 =====
+  // idea 一确认就在后台 fire-and-forget 跑 /api/compose/gather；
+  // 用户在 Step 3-4 选风格的同时素材包在后台跑；Step 5 outline 触发前等它就绪。
+  type GatherStatus = 'idle' | 'running' | 'done' | 'error' | 'skipped';
+  const [gatherStatus, setGatherStatus] = useState<GatherStatus>('idle');
+  const [gatherMaterial, setGatherMaterial] = useState<string>('');
+  const [gatherIdeaHash, setGatherIdeaHash] = useState<string>('');
+  const [gatherChars, setGatherChars] = useState<number>(0);
+  const [gatherStartedAt, setGatherStartedAt] = useState<number | null>(null);
+  const [gatherFromCache, setGatherFromCache] = useState(false);
+  const [gatherError, setGatherError] = useState<string | null>(null);
+  const [gatherElapsedMs, setGatherElapsedMs] = useState<number>(0);
+  // 标识"当前跑的 gather 对应的 idea hash"，避免 idea 改了之后老 gather 结果污染
+  const gatherCurrentIdeaRef = useRef<string>('');
+  const gatherCtrl = useRef<AbortController | null>(null);
+
+  // v3.5 · outline 软等待：进入 Step 5 时如果 gather 还在跑且预估快好（≤ SOFT_WAIT_THRESHOLD_SEC 秒前已经在跑），
+  //   就停在「等事实底座」面板上，待 gather 完成或用户点「不等了」再触发 outline fetch。
+  // 估算逻辑：codex 联网搜集一般 4-6 分钟（240-360 秒）。若 elapsed ≥ 180 秒，认为"差不多快好了"值得等；
+  //   若 elapsed < 180 秒，差距太大，不等，让用户在等待面板里手动选。
+  const [outlineWaitingForGather, setOutlineWaitingForGather] = useState(false);
+  // 用 ref 同步 gatherStatus，避免 useEffect 闭包陈旧
+  const gatherStatusRef = useRef(gatherStatus);
+  useEffect(() => { gatherStatusRef.current = gatherStatus; }, [gatherStatus]);
+  const gatherMaterialRef = useRef(gatherMaterial);
+  useEffect(() => { gatherMaterialRef.current = gatherMaterial; }, [gatherMaterial]);
+
   // Step 5 — outline
   const [outline, setOutline] = useState<Outline | null>(null);
   const [outlineLoading, setOutlineLoading] = useState(false);
@@ -399,12 +426,100 @@ export default function ComposePage() {
     setStep(2);
   }, [targetPlatform, showToast]);
 
+  // ----- v3.5 · 后台 codex 联网搜集 -----
+  /**
+   * idea 一确认就在后台跑一次 codex 联网搜集。fire-and-forget，不阻塞用户。
+   * 命中缓存（同一 idea 已搜过）秒返。
+   *
+   * 调用方：goRecommend（Step 2→3）或 skipRecommendation（Step 2 直接跳到 Step 4/5）。
+   * 同 idea 多次调用：去重——同一 idea 不重启第二次。
+   */
+  const kickoffGather = useCallback((currentIdea: string) => {
+    const trimmed = currentIdea.trim();
+    if (trimmed.length < 30) return;
+    if (gatherCurrentIdeaRef.current === trimmed) return; // 同一 idea 不重启
+    // 切掉之前那次（idea 改过来了，旧请求作废）
+    if (gatherCtrl.current) {
+      try { gatherCtrl.current.abort(); } catch {/* ignore */}
+    }
+    gatherCurrentIdeaRef.current = trimmed;
+    setGatherStatus('running');
+    setGatherMaterial('');
+    setGatherIdeaHash('');
+    setGatherChars(0);
+    setGatherFromCache(false);
+    setGatherError(null);
+    setGatherElapsedMs(0);
+    setGatherStartedAt(Date.now());
+
+    const ctrl = new AbortController();
+    gatherCtrl.current = ctrl;
+
+    (async () => {
+      try {
+        const resp = await fetch('/api/compose/gather', {
+          method: 'POST',
+          signal: ctrl.signal,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idea: trimmed }),
+        });
+        if (!resp.body) {
+          setGatherStatus('error');
+          setGatherError('响应没有 body');
+          return;
+        }
+        const reader = resp.body.getReader();
+        for await (const evt of readSseEvents(reader)) {
+          // idea 中途改过，老结果作废
+          if (gatherCurrentIdeaRef.current !== trimmed) return;
+          if (evt.event === 'cached') {
+            const d = evt.data as { material_md?: string; chars?: number; idea_hash?: string };
+            setGatherFromCache(true);
+            setGatherIdeaHash(d.idea_hash ?? '');
+            setGatherMaterial(d.material_md ?? '');
+            setGatherChars(d.chars ?? 0);
+          } else if (evt.event === 'started') {
+            const d = evt.data as { idea_hash?: string };
+            setGatherIdeaHash(d.idea_hash ?? '');
+          } else if (evt.event === 'progress') {
+            // 心跳：让 UI 知道 codex 还在干活，不卡死
+            setGatherElapsedMs(Date.now() - (gatherStartedAt ?? Date.now()));
+          } else if (evt.event === 'done') {
+            const d = evt.data as {
+              material_md?: string;
+              chars?: number;
+              idea_hash?: string;
+              elapsed_ms?: number;
+              from_cache?: boolean;
+            };
+            setGatherMaterial(d.material_md ?? '');
+            setGatherChars(d.chars ?? 0);
+            setGatherIdeaHash(d.idea_hash ?? '');
+            setGatherElapsedMs(d.elapsed_ms ?? 0);
+            setGatherFromCache(!!d.from_cache);
+            setGatherStatus('done');
+          } else if (evt.event === 'error') {
+            const d = evt.data as { message?: string };
+            setGatherStatus('error');
+            setGatherError(d.message || 'codex 搜集出了点状况');
+          }
+        }
+      } catch (e) {
+        if ((e as Error).name === 'AbortError') return;
+        setGatherStatus('error');
+        setGatherError((e as Error).message);
+      }
+    })();
+  }, [gatherStartedAt]);
+
   // ----- Step 2 -> 3 -----
   const goRecommend = useCallback(async () => {
     if (ideaWordCount < 30) {
       showToast(`再多写一点（当前 ${ideaWordCount} 字 · 至少 30 字）`);
       return;
     }
+    // v3.5：进 Step 3 的同时，后台开始 codex 联网搜集——用户在 Step 3-4 选风格的时候它在跑
+    kickoffGather(idea);
     setStep(3);
     setRecommendLoading(true);
     setRecommendError(null);
@@ -493,9 +608,8 @@ export default function ComposePage() {
     }
   }, [emptyLibrary]);
 
-  // Step 4 -> 5：生成大纲
-  const goOutline = useCallback(async () => {
-    setStep(5);
+  // v3.5：实际发起 outline fetch（独立函数，goOutline 与"软等待 useEffect"共用）
+  const runOutlineFetch = useCallback(async (materialOverride?: string) => {
     setOutlineLoading(true);
     setOutlineError(null);
     setOutlineStream('');
@@ -512,6 +626,14 @@ export default function ComposePage() {
       custom_notes: customNotes || undefined,
     };
 
+    // 用 ref 取最新 gather 状态（避免 callback 闭包旧值）；显式 override 优先
+    const ref = gatherStatusRef.current;
+    const refMd = gatherMaterialRef.current;
+    const researchMaterial =
+      materialOverride !== undefined
+        ? (materialOverride || undefined)
+        : (ref === 'done' && refMd ? refMd : undefined);
+
     try {
       const resp = await fetch('/api/compose/outline', {
         method: 'POST',
@@ -521,6 +643,7 @@ export default function ComposePage() {
           composition,
           target_platform: targetPlatform ?? undefined,
           target_site_id: targetSiteId ?? undefined,
+          research_material: researchMaterial,
         }),
       });
       if (!resp.body) { setOutlineError('响应没有 body'); setOutlineLoading(false); return; }
@@ -543,7 +666,37 @@ export default function ComposePage() {
       setOutlineError((e as Error).message);
       setOutlineLoading(false);
     }
-  }, [authors, customNotes, idea, targetPlatform]);
+  }, [authors, customNotes, idea, targetPlatform, targetSiteId]);
+
+  // Step 4 -> 5：生成大纲
+  // v3.5：软等待逻辑——如果 gather 还在跑，进 Step 5 但停在"等事实底座"面板，
+  //   不立刻发 fetch；用户点"不等了"或 gather 自然完成时再触发（见 useEffect 下面）。
+  const goOutline = useCallback(async () => {
+    setStep(5);
+    if (gatherStatus === 'running') {
+      setOutlineWaitingForGather(true);
+      return;
+    }
+    await runOutlineFetch();
+  }, [gatherStatus, runOutlineFetch]);
+
+  // v3.5：软等待续接——当用户在等 gather 时，gatherStatus 一旦从 running 变成 done/error/skipped
+  //   立刻触发真正的 outline fetch；同一份等待面板下完成自动续上。
+  useEffect(() => {
+    if (!outlineWaitingForGather) return;
+    if (gatherStatus === 'running') return;
+    setOutlineWaitingForGather(false);
+    // gather 完成、失败、跳过——无论哪种结果都触发 outline fetch
+    void runOutlineFetch();
+    // 仅在 gatherStatus 变化时触发；runOutlineFetch deps 已稳
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gatherStatus, outlineWaitingForGather]);
+
+  // v3.5：用户点"不等了"——立刻关掉等待 + 触发 outline（不带 material）
+  const skipOutlineWait = useCallback(() => {
+    setOutlineWaitingForGather(false);
+    void runOutlineFetch('');
+  }, [runOutlineFetch]);
 
   // Step 5 -> 6：流式写正文（支持多平台版本，循环 N 次）
   const goDraft = useCallback(async () => {
@@ -588,6 +741,10 @@ export default function ComposePage() {
     const ctrl = new AbortController();
     draftCtrl.current = ctrl;
 
+    // v3.5：只在 gather 已就绪时透给 draft；其余状态降级（critic 仍会按非素材包模式跑）
+    const researchMaterialForDraft =
+      gatherStatus === 'done' && gatherMaterial ? gatherMaterial : undefined;
+
     try {
       const resp = await fetch('/api/compose/draft', {
         method: 'POST',
@@ -600,6 +757,7 @@ export default function ComposePage() {
           target_platform: targetPlatform ?? undefined,
           target_site_id: targetSiteId ?? undefined,
           platforms,
+          research_material: researchMaterialForDraft,
         }),
       });
       if (!resp.body) { setDraftError('响应没有 body'); setDraftLoading(false); return; }
@@ -808,7 +966,7 @@ export default function ComposePage() {
       }
       setDraftLoading(false);
     }
-  }, [authors, customNotes, idea, outline, showToast, targetPlatform, targetSiteId, additionalPlatforms]);
+  }, [authors, customNotes, idea, outline, showToast, targetPlatform, targetSiteId, additionalPlatforms, gatherStatus, gatherMaterial]);
 
   const stopDraft = useCallback(() => {
     draftCtrl.current?.abort();
@@ -1030,7 +1188,42 @@ export default function ComposePage() {
           />
         )}
 
-        {step === 5 && (
+        {/* v3.5 · 后台 codex 搜集进度卡：Step 3-5 都可见，让用户随时看到"事实底座"在后台跑 */}
+        {(step === 3 || step === 4 || step === 5) && gatherStatus !== 'idle' && (
+          <GatherStatusCard
+            status={gatherStatus}
+            chars={gatherChars}
+            material={gatherMaterial}
+            startedAt={gatherStartedAt}
+            elapsedMs={gatherElapsedMs}
+            fromCache={gatherFromCache}
+            error={gatherError}
+            onSkip={() => {
+              if (gatherCtrl.current) {
+                try { gatherCtrl.current.abort(); } catch {/* ignore */}
+              }
+              setGatherStatus('skipped');
+            }}
+            onRetry={() => {
+              gatherCurrentIdeaRef.current = ''; // 强制重启
+              kickoffGather(idea);
+            }}
+          />
+        )}
+
+        {/* v3.5 · 软等待面板：进入 Step 5 但 gather 还没好时，用户停在这等 */}
+        {step === 5 && outlineWaitingForGather && (
+          <OutlineWaitPanel
+            startedAt={gatherStartedAt}
+            onSkip={skipOutlineWait}
+            onBack={() => {
+              setOutlineWaitingForGather(false);
+              setStep(4);
+            }}
+          />
+        )}
+
+        {step === 5 && !outlineWaitingForGather && (
           <Step5Outline
             loading={outlineLoading}
             outline={outline}
@@ -2108,6 +2301,221 @@ function Step6Draft({
         </div>
       </div>
     </section>
+  );
+}
+
+// ---------- v3.5 · outline 软等待面板 ----------
+// 用户在 Step 4 点了"生成大纲"但 gather 还在跑时，停在这里给用户选：等还是不等。
+// GatherStatusCard 上面那张卡会同时显示进度（codex 已经几秒）。
+function OutlineWaitPanel({
+  startedAt, onSkip, onBack,
+}: {
+  startedAt: number | null;
+  onSkip: () => void;
+  onBack: () => void;
+}) {
+  const [sec, setSec] = useState(startedAt ? Math.floor((Date.now() - startedAt) / 1000) : 0);
+  useEffect(() => {
+    if (!startedAt) return;
+    const id = setInterval(() => {
+      setSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [startedAt]);
+
+  // 4-6 分钟（240-360 秒）是 codex 联网搜集的典型耗时
+  const typicalAvg = 300;
+  const remainGuess = Math.max(0, typicalAvg - sec);
+  const closeToDone = sec >= 180;
+
+  return (
+    <section className="step-card">
+      <p className="step-card-eyebrow">STEP 05 · WAITING FOR FACTS</p>
+      <h1 className="step-card-title">
+        {closeToDone ? '事实底座快好了，再等一下就能开写' : '事实底座还在搜，可以等也可以不等'}
+      </h1>
+      <p className="step-card-sub">
+        codex 联网搜集已经 {sec} 秒了，
+        {closeToDone
+          ? `估计还差 ${remainGuess} 秒就能拿到。如果你愿意等，等完写出的正文会有更准的数字和案例。`
+          : `一般还要 ${remainGuess} 秒左右。不想等也行，下面直接生成大纲——只是这次模型靠经验写，不挂事实底座。`}
+      </p>
+
+      <div
+        style={{
+          margin: '20px 0',
+          padding: '14px 16px',
+          border: '1px dashed var(--border)',
+          borderRadius: 8,
+          background: 'var(--surface)',
+          fontSize: 13,
+          color: 'var(--text-muted)',
+          lineHeight: 1.7,
+        }}
+      >
+        等也好不等也好，都不会丢已经选好的风格组合。回到 Step 4 也行——idea 没改的话 codex 还在后台继续跑。
+      </div>
+
+      <div className="step-actions">
+        <div className="step-actions-left">
+          <button type="button" className="btn btn-ghost" onClick={onBack}>← 返回 Step 4</button>
+        </div>
+        <div className="step-actions-right">
+          <button type="button" className="btn btn-ghost" onClick={onSkip}>
+            不等了，直接生大纲
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ---------- v3.5 · 后台 codex 搜集状态卡 ----------
+// 挂在 Step 3-5。让用户在选风格 / 等大纲的时候，随时能看到事实底座的搜集状态。
+function GatherStatusCard({
+  status, chars, material, startedAt, elapsedMs, fromCache, error, onSkip, onRetry,
+}: {
+  status: 'idle' | 'running' | 'done' | 'error' | 'skipped';
+  chars: number;
+  material: string;
+  startedAt: number | null;
+  elapsedMs: number;
+  fromCache: boolean;
+  error: string | null;
+  onSkip: () => void;
+  onRetry: () => void;
+}) {
+  // running 状态下：基于 startedAt 自动 tick 出已用秒数，让用户看到时间在动
+  const [tickSec, setTickSec] = useState(0);
+  useEffect(() => {
+    if (status !== 'running' || !startedAt) return;
+    const id = setInterval(() => {
+      setTickSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    setTickSec(Math.floor((Date.now() - startedAt) / 1000));
+    return () => clearInterval(id);
+  }, [status, startedAt]);
+
+  const [expanded, setExpanded] = useState(false);
+
+  let leftLabel = 'CODEX 搜集';
+  let mainText: string;
+  let accent: string;
+  if (status === 'running') {
+    mainText = `正在联网搜集事实 · 已 ${tickSec} 秒（一般 4-6 分钟）`;
+    accent = 'var(--accent)';
+  } else if (status === 'done') {
+    if (fromCache) {
+      mainText = `事实底座已就绪 · ${chars.toLocaleString()} 字 · 命中缓存秒返`;
+    } else {
+      mainText = `事实底座已就绪 · ${chars.toLocaleString()} 字 · 耗时 ${Math.round(elapsedMs / 1000)} 秒`;
+    }
+    accent = 'var(--success, #2c8a4a)';
+  } else if (status === 'error') {
+    mainText = `搜集出了点状况：${error ?? '未知'}`;
+    accent = 'var(--error, #c0392b)';
+  } else if (status === 'skipped') {
+    mainText = '已跳过 · 本次写作不挂事实底座，模型按一般经验写';
+    accent = 'var(--text-muted)';
+  } else {
+    return null;
+  }
+
+  return (
+    <div
+      style={{
+        margin: '12px 0',
+        padding: '10px 14px',
+        border: '1px solid var(--border)',
+        borderLeft: '3px solid ' + accent,
+        borderRadius: 8,
+        background: 'var(--surface)',
+        fontSize: 13,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+        <span
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10,
+            letterSpacing: '0.06em',
+            color: 'var(--text-muted)',
+          }}
+        >
+          {leftLabel}
+        </span>
+        <span style={{ color: 'var(--text)' }}>{mainText}</span>
+        <div style={{ flex: 1 }} />
+        {status === 'running' && (
+          <button
+            type="button"
+            onClick={onSkip}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-muted)',
+              fontSize: 12,
+              cursor: 'pointer',
+              padding: 0,
+            }}
+          >
+            跳过本次搜集
+          </button>
+        )}
+        {(status === 'error' || status === 'skipped') && (
+          <button
+            type="button"
+            onClick={onRetry}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--accent)',
+              fontSize: 12,
+              cursor: 'pointer',
+              padding: 0,
+            }}
+          >
+            重新搜集
+          </button>
+        )}
+        {status === 'done' && material && (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--accent)',
+              fontSize: 12,
+              cursor: 'pointer',
+              padding: 0,
+            }}
+          >
+            {expanded ? '收起' : '展开看素材'}
+          </button>
+        )}
+      </div>
+      {expanded && status === 'done' && material && (
+        <pre
+          style={{
+            marginTop: 10,
+            padding: 10,
+            maxHeight: 320,
+            overflowY: 'auto',
+            background: 'var(--surface-white)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            fontSize: 12,
+            lineHeight: 1.6,
+            color: 'var(--text)',
+            whiteSpace: 'pre-wrap',
+            fontFamily: 'var(--font-sans, inherit)',
+          }}
+        >
+          {material}
+        </pre>
+      )}
+    </div>
   );
 }
 

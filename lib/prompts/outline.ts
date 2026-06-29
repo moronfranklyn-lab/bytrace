@@ -44,6 +44,11 @@ export function buildOutlinePrompt(
   fingerprints: Map<string, FingerprintMeta>,
   targetPlatformKey: PlatformKey | null = null,
   siteCtx: OutlineSiteContext | null = null,
+  /**
+   * v3.5：compose 主流程 codex 联网搜集出的素材包（事实/数据/反方/来源）。
+   * 空字符串 / undefined = 用户没等到 / 跳过了 / 题材不需要联网 —— prompt 自动降级，不强制。
+   */
+  researchMaterial?: string,
 ): string {
   const compositionSnippet = buildCompositionSystemSnippet(composition, fingerprints);
   const target = targetPlatformKey ? getPlatform(targetPlatformKey) : null;
@@ -69,13 +74,14 @@ ${platformExtra ? `\n# 博主对目标平台的适配提示\n\n${platformExtra}\
 
   const siteBlock = buildSiteBlock(siteCtx);
   const structureBlock = buildStructureCapabilityBlock(fingerprints, composition);
+  const materialBlock = buildResearchMaterialBlock(researchMaterial);
 
   return `你是写作助理。任务是为一篇尚未动笔的文章生成"先框架后填肉"的大纲。这份大纲**最关键的不是 bullet 列表，是一根能让正文层层递进的论证骨架**。
 
 # 选定的风格组合
 
 ${compositionSnippet}
-${structureBlock}${siteBlock}${platformBlock}
+${structureBlock}${siteBlock}${platformBlock}${materialBlock}
 # 作者的题材思路
 
 \`\`\`
@@ -143,8 +149,35 @@ JSON Schema：
 - 标题里禁止出现长破折号外的奇怪符号。
 - bullets 每条都是字符串，禁止嵌套对象。
 - **禁止**所有 depth_role 都是 "parallel" —— 必须至少有一节 "deeper"。
-
+${researchMaterial && researchMaterial.trim() ? `- **禁止凭空编造数字 / 引述 / 案例**——上方"素材包"里没有的硬事实，bullets 里禁止写出来；如果某节确实需要素材包里没有的事实，宁可写"这里需要补一个 X 类的具体例子"也别瞎填。\n` : ''}
 现在请输出 JSON。`;
+}
+
+/**
+ * v3.5：把 codex 联网搜出来的素材包注入 prompt。
+ *
+ * 设计原则：
+ *   - 让模型把素材包当成"唯一的事实来源"，不要凭空编
+ *   - 但只是"建议优先用"，不是"必须用每一条"——免得 outline 被素材包牵着走偏离题材
+ *   - 6000+ 字素材包不截断（让模型自己取舍），免得截掉关键反方
+ */
+function buildResearchMaterialBlock(material: string | undefined): string {
+  const trimmed = (material ?? '').trim();
+  if (!trimmed) return '';
+  return `
+# 已搜集的素材包（codex 联网产出 · 事实 / 观点 / 反方 / 来源）
+
+下面这段是 codex 刚联网搜来的硬料，作为本次大纲的**事实底座**：
+
+- 凡是要在 bullets 或 thesis 里写出具体数字 / 人名 / 事件 / 引用，**优先**从这里取，并保持原貌。
+- 素材包里同时包含【事实】和【观点】，**outline 要明确把哪些章节挂在【事实】上**，哪些章节挂在【观点/争议】上。
+- 若素材里给了反方证据，至少留一节 depth_role = "turn" 或 "parallel" 容纳反方。
+- 素材包里没有的具体数字 / 引用，**禁止**写进 bullets——bullets 是写作骨架，不该出现"凭空想象的事实"。
+
+\`\`\`
+${trimmed}
+\`\`\`
+`;
 }
 
 /**

@@ -76,22 +76,41 @@ export async function GET() {
   }
 
   // ---- ② 联网事实搜索 ----
+  // 有效供应商：BYTRACE_SEARCH_PROVIDER 若为具体值就直接用；若为 auto 则按
+  // MiMo（复用主 Agent key，无需额外账号）→ 豆包 → Tavily → 免 key 兜底 推导。
   const searchCandidates: string[] = [];
-  if (search.doubaoReady) searchCandidates.push('豆包（火山方舟）');
   if (search.mimoReady) searchCandidates.push('MiMo');
+  if (search.doubaoReady) searchCandidates.push('豆包（火山方舟）');
   if (search.tavilyReady) searchCandidates.push('Tavily');
   if (search.googleCseReady) searchCandidates.push('Google CSE');
   searchCandidates.push('DuckDuckGo（免 key 兜底）');
 
+  const effectiveProvider =
+    search.provider !== 'auto'
+      ? search.provider
+      : search.mimoReady
+        ? 'mimo'
+        : search.doubaoReady
+          ? 'doubao'
+          : search.tavilyReady
+            ? 'tavily'
+            : 'web-facts';
+
+  const hasRealSearch = search.mimoReady || search.doubaoReady || search.tavilyReady;
+
   checks.push({
     key: 'search',
-    label: `联网事实搜索（provider=${search.provider}）`,
-    status: search.doubaoReady || search.mimoReady || search.tavilyReady ? 'ready' : 'not-needed',
-    detail: `可用通道：${searchCandidates.join(' → ')}`,
-    fix:
-      search.doubaoReady || search.mimoReady || search.tavilyReady
-        ? undefined
-        : '可选。不配会走免 key 的 DuckDuckGo；想用豆包请填 BYTRACE_SEARCH_API_KEY（并到方舟控制台开通「联网内容插件」）',
+    label: `联网事实搜索（provider=${effectiveProvider}）`,
+    status: hasRealSearch ? 'ready' : 'not-needed',
+    detail: hasRealSearch
+      ? `可用通道：${searchCandidates.join(' → ')} · 实际走 ${effectiveProvider}`
+      : `可用通道：${searchCandidates.join(' → ')}`,
+    fix: hasRealSearch
+      ? undefined
+      : '可选。不配会走免 key 的 DuckDuckGo。' +
+        (agent.isMimo
+          ? '你用的是 MiMo —— 去 https://platform.xiaomimimo.com/#/console/plugin 开启「联网搜索」插件即可，无需额外 key'
+          : '想用豆包请填 BYTRACE_SEARCH_API_KEY 并到方舟控制台开通「联网内容插件」'),
   });
 
   // ---- ③ 数据库 ----

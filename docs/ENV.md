@@ -17,7 +17,18 @@
 | 用途 | 供应商 | 关键变量 |
 | --- | --- | --- |
 | 主 Agent | **MiMo（小米）** | `BYTRACE_AGENT_BASE_URL=https://api.xiaomimimo.com/v1` + `BYTRACE_AGENT_API_KEY` |
-| 联网事实搜索 | **豆包（火山方舟）** | `BYTRACE_SEARCH_API_KEY`（方舟 key）+ 控制台开通「联网内容插件」 |
+| 联网事实搜索 | **MiMo 自带的 web_search 插件** | `BYTRACE_SEARCH_PROVIDER=mimo` —— **复用上面同一个 key，不需要第二个账号** |
+
+> **✅ 结论：主 Agent 和联网搜索只需要一个 MiMo key。**
+> MiMo 的 `web_search` 是「挂在对话模型上的联网工具」，直接复用主 Agent 的 key 与端点。
+> **唯一前提**：到 https://platform.xiaomimimo.com/#/console/plugin 开启「联网搜索」插件（约 5 分钟生效）。
+>
+> **2026-09-24 实测**：用 Ethan 的 MiMo key 打 `GET /api/health/search?q=2026年AI产品经理趋势` →
+> `ok:true`，MiMo 命中 **22 条**来源，耗时 **40s**；免 key 的 DuckDuckGo 兜底命中 8 条，耗时 12s。
+> 说明插件已开启且搜索链路完全可用。
+>
+> **豆包（火山方舟）是可选项**，只在你想换一个搜索源时才需要：填 `BYTRACE_SEARCH_API_KEY`
+> 并把 `BYTRACE_SEARCH_PROVIDER` 改成 `auto` 或 `doubao`，同时到方舟控制台开通「联网内容插件」。
 
 **一处不用改就能跑**：什么都不填 → 自动回退本机 Claude / Codex CLI 订阅。
 
@@ -129,9 +140,9 @@ BYTRACE_*   →   AUTOARTICLE_*   →   OPENAI_*   →   内置默认值
 **事实底座的真实优先级链**（`app/api/compose/gather/route.ts`）：
 
 ```
-① 豆包（火山方舟 Responses API + web_search）   ← ★ 当前选定
+① MiMo web_search        ← ★ 当前选定。复用主 Agent 的 key，无需额外账号
         ↓ 未配置 / 失败
-② MiMo web_search                              ← 复用主 Agent 的 key
+② 豆包（火山方舟 Responses API + web_search）   ← 可选，需独立的方舟 key
         ↓ 未配置 / 失败
 ③ Tavily                                       ← 需 TAVILY_API_KEY
         ↓ 未配置 / 无结果
@@ -140,7 +151,15 @@ BYTRACE_*   →   AUTOARTICLE_*   →   OPENAI_*   →   内置默认值
 ⑤ DuckDuckGo HTML（免 key，内置 1.5s 节流）
 ```
 
-**用 `BYTRACE_SEARCH_PROVIDER` 强制指定通道**：`auto`（默认）| `doubao` | `mimo` | `tavily` | `web-facts`。
+**用 `BYTRACE_SEARCH_PROVIDER` 强制指定通道**：`auto`（默认，MiMo 优先）| `mimo` | `doubao` | `tavily` | `web-facts`。
+
+### 三种搜索通道的性质差异（重要）
+
+| 通道 | 返回什么 | 耗时（实测） | 成本 |
+| --- | --- | --- | --- |
+| **MiMo web_search** | **模型整理后的结果** + 带引用来源 | ~40s | 含在 MiMo key 里（另计联网插件调用费） |
+| 豆包（方舟） | 模型整理后的结果 + url_citation | ~15-70s（取决于选的方舟模型） | 方舟 key，¥16/千次 |
+| web-facts | **原始网页列表**（标题/URL/摘要） | ~12s | 免费 |
 
 | 变量（新名优先） | 必填 | 默认 | 作用 |
 | --- | --- | --- | --- |

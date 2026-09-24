@@ -347,8 +347,10 @@ async function buildGatherPromptWithSearch(idea: string): Promise<{
   let mimoAnswer = '';
 
   // 搜索供应商选择：BYTRACE_SEARCH_PROVIDER
-  //   auto（默认）= 豆包 → MiMo → Tavily → Google CSE / DuckDuckGo
-  //   也可强制 'doubao' / 'mimo' / 'tavily' / 'web-facts'
+  //   auto（默认）= MiMo → 豆包 → Tavily → Google CSE / DuckDuckGo
+  //     ★ MiMo 优先：它的 web_search 插件复用主 Agent 的 key 与端点，
+  //       不用额外申请账号，所以列为默认首选。
+  //   也可强制 'mimo' / 'doubao' / 'tavily' / 'web-facts'
   const providerPref = (
     envStr('BYTRACE_SEARCH_PROVIDER', 'AUTOARTICLE_SEARCH_PROVIDER') || 'auto'
   ).toLowerCase();

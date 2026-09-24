@@ -732,7 +732,7 @@ export default function ComposePage() {
           } else if (evt.event === 'error') {
             const d = evt.data as { message?: string };
             setGatherStatus('error');
-            setGatherError(d.message || 'codex 搜集出了点状况');
+            setGatherError(d.message || '联网搜集这次没成，我们换个角度再试一次');
             sawDone = true;
           }
         }

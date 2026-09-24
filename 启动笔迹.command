@@ -125,7 +125,29 @@ echo "${GREEN}✓${RESET} 端口 ${DIM}$PORT${RESET}"
 echo ""
 
 # ---------------------------------------------------------------------------
-# 3. 起服务
+# 3. 选择启动方式
+#   装了 Electron 就开独立窗口（推荐）；否则退回浏览器模式。
+# ---------------------------------------------------------------------------
+export PATH="$NODE_BIN_DIR:$PATH"
+
+ELECTRON_PATH_FILE="$PROJECT_DIR/node_modules/electron/path.txt"
+HAS_ELECTRON=0
+if [ -f "$ELECTRON_PATH_FILE" ]; then
+  ELECTRON_EXE="$PROJECT_DIR/node_modules/electron/dist/$(cat "$ELECTRON_PATH_FILE")"
+  [ -x "$ELECTRON_EXE" ] && HAS_ELECTRON=1
+fi
+
+if [ "$HAS_ELECTRON" = "1" ]; then
+  echo "${BOLD}启动桌面窗口…${RESET} ${DIM}(首次启动需要编译页面，约 30-60 秒)${RESET}"
+  echo ""
+  echo "${DIM}  想用浏览器打开而不是独立窗口，可执行：npm run dev${RESET}"
+  echo ""
+  # 交给桌面外壳：它自己负责起服务、开窗口、退出时回收
+  exec "$PICKED_NODE" scripts/desktop.mjs
+fi
+
+# ---------------------------------------------------------------------------
+# 3b. 浏览器模式（未安装 Electron 时）
 # ---------------------------------------------------------------------------
 echo "${BOLD}启动中…${RESET} ${DIM}(首次启动需要编译页面，约 10-30 秒)${RESET}"
 echo ""

@@ -17,7 +17,7 @@ export const dynamic = 'force-dynamic';
  *   body: { from: PlatformKey, to: PlatformKey }
  *
  * 算"从 from 平台版改写到 to 平台版做了什么调整"的摘要。
- * 走 Claude CLI（spawn），结果按 (article_id, from, to, from_hash, to_hash) 缓存。
+ * 结果按 (article_id, from, to, from_hash, to_hash) 缓存，内容未变则直接命中。
  *
  * - 内容未变 → 直接返缓存
  * - 内容变了（hash mismatch）→ 重算并覆盖

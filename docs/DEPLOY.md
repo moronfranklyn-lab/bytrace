@@ -385,6 +385,48 @@ npx tsc --noEmit
 
 ---
 
+## 6b. 桌面外壳（Electron）排错
+
+### 报 `Cannot find module 'electron'`，但 Electron 明明装了
+
+**原因**：环境里存在 `ELECTRON_RUN_AS_NODE=1`。这个变量会让任意 Electron 二进制
+退化成普通 Node 进程，于是它不再提供内置的 `electron` 模块，报错信息完全指不到真正原因。
+
+**判断**：
+
+```bash
+echo "$ELECTRON_RUN_AS_NODE"      # 输出 1 就是它
+```
+
+**处理**：用项目提供的包装器启动，它会自动清掉该变量：
+
+```bash
+npm run desktop
+```
+
+### 窗口打不开 / 反复刷 `sandbox initialization failed` 或 GPU 进程崩溃
+
+**原因**：受限环境（外置卷、沙箱、主目录不可写）下 Chromium 的进程沙箱与 GPU 缓存目录不可用。
+
+**处理**：包装器已内置两项规避，无需手动配置：
+
+- `app.disableHardwareAcceleration()` 与 `--disable-gpu`：关掉用不到的 GPU 加速
+- `--no-sandbox`：桌面外壳只加载本机回环地址的界面，不加载外部不可信内容
+
+同时它会把 Electron 的数据与缓存目录用 `app.setPath()` 引到项目内的 `.cache/`，
+避免往 `~/Library/Application Support` 写（macOS 不认 `XDG_*` 变量，必须用 API）。
+
+### 窗口一直白屏
+
+按 `Cmd+R` 重新加载；仍不行就带调试日志启动看卡在哪一步：
+
+```bash
+BYTRACE_DESKTOP_DEBUG=1 npm run desktop
+```
+
+日志会依次打印：数据目录 → 窗口创建 → Node 选择 → 端口 → 服务就绪 → 界面加载。
+任一步失败都会在窗口里显示可操作的中文说明，不会静默白屏。
+
 ## 7. 健康检查
 
 ### 7.1 类型检查（核心 gate）

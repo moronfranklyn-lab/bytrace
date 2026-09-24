@@ -52,9 +52,26 @@ AI 写作工具的通病是**表面像、里面空**：能学到一个博主的�
 | --- | --- |
 | **安装笔迹.command** | 一次性安装：检查 Node → 装依赖 → 生成配置 → 环境体检 → 装启动图标 |
 | **填写API密钥.command** | 打开配置文件填 API key（不填也能跑，会回退到本机 CLI 订阅） |
-| **启动笔迹.command** | 启动服务并自动打开浏览器 |
+| **启动笔迹.command** | 启动应用。**已装桌面外壳时打开独立窗口**，否则退回浏览器 |
 
 安装后桌面上会出现「笔迹 ByTrace」图标，以后直接双击它就能用。
+
+### 桌面窗口 vs 浏览器
+
+| 方式 | 命令 | 说明 |
+| --- | --- | --- |
+| **桌面窗口**（默认） | 双击 `启动笔迹.command` 或 `npm run desktop` | Electron 外壳 + 原生窗口 + 应用菜单，独立于浏览器 |
+| 浏览器 | `npm run dev` | 起服务后自己用浏览器开 `http://127.0.0.1:3100` |
+
+装了 Electron 后，启动器会自动优先开桌面窗口。想强制用浏览器就执行 `npm run dev`。
+
+> 桌面外壳需要额外下载约 130MB 的 Electron 二进制。**没装也能正常使用**，只是走浏览器。
+> 国内网络慢的话用镜像装：
+> ```bash
+> electron_config_cache="$PWD/.cache/electron" \
+>   ELECTRON_MIRROR="https://registry.npmmirror.com/-/binary/electron/" \
+>   npm install
+> ```
 
 > 首次双击若被 macOS 拦截（提示来自身份不明的开发者），
 > **右键点该文件 → 选「打开」→ 再点「打开」**，只需一次。

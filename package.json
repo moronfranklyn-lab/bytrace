@@ -8,7 +8,9 @@
     "start": "node scripts/dev.mjs start",
     "lint": "next lint",
     "dev:port": "node scripts/dev.mjs dev",
-    "doctor": "node scripts/doctor.mjs"
+    "doctor": "node scripts/doctor.mjs",
+    "desktop": "node scripts/desktop.mjs",
+    "desktop:devtools": "node scripts/desktop.mjs --devtools"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
@@ -29,9 +31,11 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "autoprefixer": "^10.4.20",
+    "electron": "^44.4.5",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.14",
     "tsx": "^4.22.3",
     "typescript": "^5.6.3"
-  }
+  },
+  "main": "desktop/main.mjs"
 }

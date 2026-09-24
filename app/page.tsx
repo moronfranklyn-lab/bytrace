@@ -71,7 +71,7 @@ export default async function HomePage() {
             <div>
               <div className="eyebrow">
                 <span className="eyebrow-dot" />
-                本地运行 · 走 Claude Code 额度 · 不联网
+                本地运行 · 数据留在本机 · 模型可换
               </div>
             </div>
             <h1 className="hero-title">

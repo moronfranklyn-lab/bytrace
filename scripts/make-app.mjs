@@ -45,7 +45,11 @@ const PLIST = `<?xml version="1.0" encoding="UTF-8"?>
 const LAUNCH = `#!/bin/bash
 # 由安装程序生成 · 启动笔迹 ByTrace
 
-APP_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+# APP_DIR 必须上溯 4 层：
+#   <APP_DIR>/笔迹 ByTrace.app/Contents/MacOS/launch
+#   ① MacOS→Contents  ② Contents→.app  ③ .app→所在目录  ④ 所在目录→项目根
+# 少一层就会解析成 .app 所在的目录（例如 dist/），从而找不到启动器。
+APP_DIR="$(cd "$(dirname "$0")/../../../.." && pwd)"
 
 try_launch() {
   if [ -n "$1" ] && [ -x "$1/启动笔迹.command" ]; then
@@ -54,7 +58,6 @@ try_launch() {
 }
 
 try_launch "$APP_DIR"
-try_launch "$APP_DIR/dist"
 [ -n "$BYTRACE_HOME" ] && try_launch "$BYTRACE_HOME"
 
 RECORDED="$APP_DIR/Contents/Resources/project-path"

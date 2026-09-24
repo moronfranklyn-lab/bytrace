@@ -7,7 +7,9 @@ import { ensureGatherRunsTable } from '@/lib/schema-additions-gather';
 import { ensureKnowledgeBaseTable } from '@/lib/schema-additions-knowledge-base';
 import { createSseStream, stripMarkdownFence } from '@/lib/sse';
 import { searchWithMimo, isMimoWebSearchConfigured } from '@/lib/search/mimo-web-search';
+import { searchWithDoubao, isDoubaoSearchUsable } from '@/lib/search/doubao-web-search';
 import { searchWebFacts } from '@/lib/search/web-facts';
+import { envStr, TAVILY_KEY_KEYS } from '@/lib/env';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -18,7 +20,7 @@ interface IncomingPayload {
 
 const MIN_IDEA_CHARS = 30;
 const GATHER_TIMEOUT_MS = 360_000;
-const TAVILY_API_KEY = () => process.env.TAVILY_API_KEY || '';
+const TAVILY_API_KEY = () => envStr(...TAVILY_KEY_KEYS) || '';
 
 /** 统一事实搜索命中（MiMo / Tavily / DuckDuckGo / Google CSE） */
 interface FactSearchHit {
@@ -344,7 +346,40 @@ async function buildGatherPromptWithSearch(idea: string): Promise<{
   let searchEngine = 'none';
   let mimoAnswer = '';
 
-  if (isMimoWebSearchConfigured()) {
+  // 搜索供应商选择：BYTRACE_SEARCH_PROVIDER
+  //   auto（默认）= 豆包 → MiMo → Tavily → Google CSE / DuckDuckGo
+  //   也可强制 'doubao' / 'mimo' / 'tavily' / 'web-facts'
+  const providerPref = (
+    envStr('BYTRACE_SEARCH_PROVIDER', 'AUTOARTICLE_SEARCH_PROVIDER') || 'auto'
+  ).toLowerCase();
+
+  const wantDoubao = providerPref === 'auto' || providerPref === 'doubao';
+  const wantMimo = providerPref === 'auto' || providerPref === 'mimo';
+  const wantTavily = providerPref === 'auto' || providerPref === 'tavily';
+  const wantWebFacts = providerPref === 'auto' || providerPref === 'web-facts';
+
+  // ① 豆包（火山方舟）联网内容插件
+  if (wantDoubao && isDoubaoSearchUsable()) {
+    console.log('[gather] 尝试豆包（火山方舟）联网搜索…');
+    const doubao = await searchWithDoubao(searchQuery);
+    if (doubao.ok) {
+      searchResults = doubao.results.map((r) => ({
+        title: r.title,
+        url: r.url,
+        content: r.content,
+        score: r.score,
+        source: 'doubao',
+      }));
+      if (doubao.answer) mimoAnswer = doubao.answer;
+      searchEngine = 'doubao';
+      console.log(`[gather] 豆包命中 ${searchResults.length} 条来源（${doubao.searchCount ?? 0} 次搜索）`);
+    } else {
+      console.warn('[gather] 豆包搜索不可用:', doubao.error);
+    }
+  }
+
+  // ② MiMo web_search（复用主 Agent 的 MiMo key）
+  if (searchResults.length === 0 && !mimoAnswer && wantMimo && isMimoWebSearchConfigured()) {
     console.log('[gather] 尝试 MiMo web_search…');
     const mimo = await searchWithMimo(searchQuery);
     if (mimo.ok) {
@@ -363,7 +398,8 @@ async function buildGatherPromptWithSearch(idea: string): Promise<{
     }
   }
 
-  if (searchResults.length === 0 && !mimoAnswer) {
+  // ③ Tavily
+  if (searchResults.length === 0 && !mimoAnswer && wantTavily) {
     const tavily = await searchWithTavily(searchQuery);
     if (tavily.length > 0) {
       searchResults = tavily;
@@ -372,7 +408,8 @@ async function buildGatherPromptWithSearch(idea: string): Promise<{
     }
   }
 
-  if (searchResults.length === 0 && !mimoAnswer) {
+  // ④ 免 key 兜底（Google CSE / DuckDuckGo）
+  if (searchResults.length === 0 && !mimoAnswer && wantWebFacts) {
     console.log('[gather] 回落自带联网搜索（Google CSE / DuckDuckGo）…');
     const facts = await searchWebFacts(searchQuery);
     if (facts.length > 0) {
@@ -388,7 +425,7 @@ async function buildGatherPromptWithSearch(idea: string): Promise<{
   if (searchResults.length > 0 || mimoAnswer) {
     searchContext = `\n\n## 实时搜索结果（事实底座来源：${searchEngine}）\n\n`;
     if (mimoAnswer) {
-      searchContext += `### MiMo 联网整理\n\n${mimoAnswer.slice(0, 4000)}\n\n`;
+      searchContext += `### ${searchEngine === 'mimo' ? 'MiMo' : searchEngine === 'doubao' ? '豆包' : '联网'} 整理\n\n${mimoAnswer.slice(0, 4000)}\n\n`;
     }
     if (searchResults.length > 0) {
       searchContext += '以下是联网检索到的公开来源：\n\n';

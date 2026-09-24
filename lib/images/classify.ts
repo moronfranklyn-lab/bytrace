@@ -18,6 +18,7 @@
 
 import { spawn } from 'node:child_process';
 import { getDb } from '@/lib/db';
+import { envStr, CLAUDE_BIN_KEYS } from '@/lib/env';
 
 /** 与 scanner.guessVisualStyle 同一套枚举，多加"照片"（启发式分不出但真看图能分）。 */
 export const VISUAL_STYLES = ['截图', '插画', '数据图', '照片', '其他'] as const;
@@ -29,7 +30,8 @@ export interface ClassifyResult {
 }
 
 const CLASSIFY_TIMEOUT_MS = 90_000; // 单图看图 + 出 JSON，留足余量
-const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
+// 复用 lib/claude.ts 的候选推导（BYTRACE_CLAUDE_BIN / PATH / $HOME 常见位置），避免各处硬编码
+const CLAUDE_BIN = envStr(...CLAUDE_BIN_KEYS) || 'claude';
 
 function buildClassifyPrompt(imagePath: string): string {
   return [

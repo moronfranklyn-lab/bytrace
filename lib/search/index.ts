@@ -16,6 +16,7 @@ import got from 'got';
 import * as cheerio from 'cheerio';
 import { DESKTOP_UA } from '../crawler/http';
 import { isWechatHost } from '../crawler/wechat';
+import { envStr, GOOGLE_CSE_KEY_KEYS, GOOGLE_CSE_ID_KEYS } from '@/lib/env';
 import type { AuthorCandidate, SearchError } from './types';
 
 export type { AuthorCandidate, SearchError } from './types';
@@ -141,8 +142,8 @@ export async function searchAuthor(
   }
 
   // 2) 优先 Google CSE（若有 key）
-  const gKey = process.env.GOOGLE_CSE_KEY;
-  const gCx = process.env.GOOGLE_CSE_ID;
+  const gKey = envStr(...GOOGLE_CSE_KEY_KEYS);
+  const gCx = envStr(...GOOGLE_CSE_ID_KEYS);
   let result: AuthorCandidate[] | SearchError;
   if (gKey && gCx) {
     result = await searchViaGoogleCSE(trimmed, gKey, gCx);

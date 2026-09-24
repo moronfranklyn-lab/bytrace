@@ -6,6 +6,13 @@
  * 仅按量计费 sk- key + https://api.xiaomimimo.com/v1 可用；Token Plan (tp-) 通常不可用。
  */
 
+import {
+  envNum,
+  envStr,
+  isMimoWebSearchUsable,
+  resolveMimoSearchConfig,
+} from '@/lib/env';
+
 export interface MimoSearchHit {
   title: string;
   url: string;
@@ -30,29 +37,21 @@ function trimSlash(url: string): string {
   return url.replace(/\/+$/, '');
 }
 
-/** 当前 LLM 配置是否指向 MiMo 直连 API（可挂 web_search） */
+/**
+ * 当前 LLM 配置是否指向 MiMo 直连 API（可挂 web_search）。
+ * 判定逻辑统一收在 lib/env.ts 的 isMimoWebSearchUsable()，本文件只做转发，
+ * 避免「配置读取」散落在多处导致新名 BYTRACE_* 读不到。
+ */
 export function isMimoWebSearchConfigured(): boolean {
-  const flag = (process.env.AUTOARTICLE_MIMO_WEB_SEARCH || 'auto').trim().toLowerCase();
-  if (flag === '0' || flag === 'false' || flag === 'off') return false;
-  if (flag === '1' || flag === 'true' || flag === 'on') return true;
-
-  const base = (
-    process.env.AUTOARTICLE_LLM_BASE_URL ||
-    process.env.OPENAI_BASE_URL ||
-    ''
-  ).toLowerCase();
-  const key = process.env.AUTOARTICLE_LLM_API_KEY || process.env.OPENAI_API_KEY || '';
-  // Token Plan 端点通常不支持 web_search
-  if (base.includes('token-plan')) return false;
-  if (!key.startsWith('sk-')) return false;
-  return base.includes('xiaomimimo.com');
+  return isMimoWebSearchUsable();
 }
 
 export function buildMimoWebSearchTool() {
-  const maxKeyword = Number(process.env.AUTOARTICLE_MIMO_MAX_KEYWORD || 3) || 3;
-  const limit = Number(process.env.AUTOARTICLE_MIMO_SEARCH_LIMIT || 5) || 5;
+  const maxKeyword = envNum(3, 'BYTRACE_SEARCH_MAX_KEYWORD', 'AUTOARTICLE_MIMO_MAX_KEYWORD');
+  const limit = envNum(5, 'BYTRACE_SEARCH_MAX_RESULTS', 'AUTOARTICLE_MIMO_SEARCH_LIMIT');
   const force =
-    (process.env.AUTOARTICLE_MIMO_FORCE_SEARCH || 'true').trim().toLowerCase() !== 'false';
+    (envStr('BYTRACE_MIMO_FORCE_SEARCH', 'AUTOARTICLE_MIMO_FORCE_SEARCH') || 'true')
+      .toLowerCase() !== 'false';
 
   return {
     type: 'web_search' as const,
@@ -61,25 +60,16 @@ export function buildMimoWebSearchTool() {
     limit,
     user_location: {
       type: 'approximate' as const,
-      country: process.env.AUTOARTICLE_MIMO_SEARCH_COUNTRY || 'China',
-      region: process.env.AUTOARTICLE_MIMO_SEARCH_REGION || 'Beijing',
-      city: process.env.AUTOARTICLE_MIMO_SEARCH_CITY || 'Beijing',
+      country: envStr('BYTRACE_MIMO_SEARCH_COUNTRY', 'AUTOARTICLE_MIMO_SEARCH_COUNTRY') || 'China',
+      region: envStr('BYTRACE_MIMO_SEARCH_REGION', 'AUTOARTICLE_MIMO_SEARCH_REGION') || 'Beijing',
+      city: envStr('BYTRACE_MIMO_SEARCH_CITY', 'AUTOARTICLE_MIMO_SEARCH_CITY') || 'Beijing',
     },
   };
 }
 
 function resolveMimoEndpoint(): { baseUrl: string; apiKey: string; model: string } {
-  const baseUrl = trimSlash(
-    process.env.AUTOARTICLE_LLM_BASE_URL ||
-      process.env.OPENAI_BASE_URL ||
-      'https://api.xiaomimimo.com/v1',
-  );
-  const apiKey = process.env.AUTOARTICLE_LLM_API_KEY || process.env.OPENAI_API_KEY || '';
-  const model =
-    process.env.AUTOARTICLE_LLM_MODEL ||
-    process.env.OPENAI_MODEL ||
-    'mimo-v2.5-pro';
-  return { baseUrl, apiKey, model };
+  const { baseUrl, apiKey, model } = resolveMimoSearchConfig();
+  return { baseUrl: trimSlash(baseUrl), apiKey, model };
 }
 
 function extractHitsFromAnnotations(annotations: unknown): MimoSearchHit[] {
@@ -133,13 +123,19 @@ export async function searchWithMimo(
       ok: false,
       results: [],
       answer: '',
-      error: 'MiMo 联网搜索未启用或未配置（需 sk- key + api.xiaomimimo.com）',
+      error:
+        'MiMo 联网搜索未启用或未配置（需 sk- 按量计费 key + api.xiaomimimo.com 且控制台已开「联网搜索」插件）',
     };
   }
 
   const { baseUrl, apiKey, model } = resolveMimoEndpoint();
   if (!apiKey) {
-    return { ok: false, results: [], answer: '', error: '缺少 AUTOARTICLE_LLM_API_KEY' };
+    return {
+      ok: false,
+      results: [],
+      answer: '',
+      error: '缺少 MiMo API key：请在 .env.local 设置 BYTRACE_AGENT_API_KEY',
+    };
   }
 
   const timeoutMs = options?.timeoutMs ?? 90_000;

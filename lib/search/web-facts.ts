@@ -14,7 +14,14 @@ export interface WebFactHit {
   url: string;
   content: string;
   score: number;
-  source: 'google' | 'duckduckgo' | 'bing';
+  /**
+   * 来源通道。
+   * - google / duckduckgo / bing：web-facts 通用抓取
+   * - doubao：火山方舟（豆包）联网内容插件
+   * - mimo：小米 MiMo web_search 插件
+   * - tavily：Tavily
+   */
+  source: 'google' | 'duckduckgo' | 'bing' | 'doubao' | 'mimo' | 'tavily';
 }
 
 const DDG_COOLDOWN_MS = 1500;

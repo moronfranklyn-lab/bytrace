@@ -4,6 +4,8 @@
  * library + crawled stash. No throws.
  */
 
+import { envStr, UNSPLASH_KEY_KEYS } from '@/lib/env';
+
 export interface UnsplashPhoto {
   id: string;
   url: string;            // regular size, suitable for article body
@@ -18,7 +20,7 @@ export interface UnsplashPhoto {
 const UNSPLASH_API = 'https://api.unsplash.com/search/photos';
 
 function getAccessKey(): string | null {
-  const key = process.env.UNSPLASH_ACCESS_KEY;
+  const key = envStr(...UNSPLASH_KEY_KEYS);
   if (!key || key.trim().length === 0) return null;
   return key.trim();
 }

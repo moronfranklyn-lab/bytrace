@@ -24,9 +24,10 @@ import type {
   CrawlError,
 } from '../types';
 import { hashUrl } from '../dedupe';
+import { envStr, YOUTUBE_KEY_KEYS } from '@/lib/env';
 import { DESKTOP_UA } from '../http';
 
-const YT_KEY = () => process.env.YOUTUBE_DATA_API_KEY || '';
+const YT_KEY = () => envStr(...YOUTUBE_KEY_KEYS) || '';
 
 const YT_DATA_BASE = 'https://www.googleapis.com/youtube/v3';
 

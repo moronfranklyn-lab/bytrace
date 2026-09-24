@@ -29,3 +29,9 @@ npm-debug.log*
 
 # stray root db (real db lives in data/)
 /autoarticle.db
+
+# local build caches (node-gyp / npm) redirected into workspace for sandboxed builds
+.cache/
+
+# local env backup
+.env.local.backup-*

@@ -1,18 +1,58 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import {
+  AGENT_API_KEY_KEYS,
+  AGENT_ARTICLE_MODEL_KEYS,
+  AGENT_BASE_URL_KEYS,
+  AGENT_MODEL_KEYS,
+  AGENT_PROVIDER_KEYS,
+  CODEX_ARTICLE_MODEL_KEYS,
+  CODEX_BIN_KEYS,
+  CODEX_CWD_KEYS,
+  CODEX_MODEL_KEYS,
+  CLAUDE_BIN_KEYS,
+  envStr,
+  firstNonEmpty,
+} from '@/lib/env';
 
-// 2026-07 机器重装后 claude 装在 ~/.local/bin（旧的 ~/.npm-global 已不存在），两个位置都兜底
-const FALLBACK_CLAUDE_CANDIDATES = [
-  '/Users/mixingtumima0000/.local/bin/claude',
-  '/Users/mixingtumima0000/.npm-global/bin/claude',
-];
-const FALLBACK_CLAUDE_PATH =
-  FALLBACK_CLAUDE_CANDIDATES.find((p) => existsSync(p)) ?? FALLBACK_CLAUDE_CANDIDATES[0];
+/**
+ * 本机 Claude CLI 的兜底搜索路径。
+ *
+ * 历史问题：这里曾经**硬编码** `/Users/mixingtumima0000/...`，换电脑必挂。
+ * 现在改为按「用户无关」的方式推导：
+ *   1. BYTRACE_CLAUDE_BIN / CLAUDE_BIN 显式指定（最高优先）
+ *   2. `claude`（交给 PATH 解析）
+ *   3. $HOME 下的常见安装位置（~/.local/bin、~/.npm-global/bin、~/.bun/bin、/opt/homebrew/bin）
+ *
+ * 注意：路径不存在不会立刻报错——spawn 会抛 ENOENT，届时按候选顺序回退。
+ */
+export const CLAUDE_BIN_CANDIDATES: string[] = (() => {
+  const explicit = envStr(...CLAUDE_BIN_KEYS);
+  const home = homedir();
+  return [
+    ...(explicit ? [explicit] : []),
+    'claude',
+    join(home, '.local', 'bin', 'claude'),
+    join(home, '.npm-global', 'bin', 'claude'),
+    join(home, '.bun', 'bin', 'claude'),
+    '/opt/homebrew/bin/claude',
+    '/usr/local/bin/claude',
+  ];
+})();
+
+/** 第一个真实存在于磁盘上的候选；都不存在时返回 'claude'（让 PATH 再试一次）。 */
+export const CLAUDE_BIN: string =
+  CLAUDE_BIN_CANDIDATES.find((p) => p === 'claude' || existsSync(p)) ??
+  firstNonEmpty(envStr(...CLAUDE_BIN_KEYS)) ??
+  'claude';
+
 const DEFAULT_TIMEOUT_MS = 180_000;
 
 /**
  * 文章产出（正文 draft / 润色 refine）默认给 claude-cli 传 sonnet。
- * API provider 会把这个别名映射到 AUTOARTICLE_LLM_ARTICLE_MODEL / AUTOARTICLE_LLM_MODEL。
+ * API provider 会把这个别名映射到 BYTRACE_AGENT_ARTICLE_MODEL / AUTOARTICLE_LLM_ARTICLE_MODEL / AUTOARTICLE_LLM_MODEL。
  */
 export const ARTICLE_MODEL = 'sonnet';
 
@@ -42,7 +82,7 @@ interface ApiStreamConfig {
   model: string;
 }
 
-function normalizeProvider(raw = process.env.AUTOARTICLE_LLM_PROVIDER): LlmProvider {
+function normalizeProvider(raw = envStr(...AGENT_PROVIDER_KEYS)): LlmProvider {
   const provider = (raw || 'claude-cli').trim().toLowerCase();
   if (!provider || provider === 'claude' || provider === 'claude-cli') return 'claude-cli';
   if (provider === 'codex' || provider === 'codex-cli') return 'codex-cli';
@@ -53,7 +93,10 @@ function normalizeProvider(raw = process.env.AUTOARTICLE_LLM_PROVIDER): LlmProvi
     provider === 'openai-compatible' ||
     provider === 'lmstudio' ||
     provider === 'lm-studio' ||
-    provider === 'ollama'
+    provider === 'ollama' ||
+    provider === 'mimo' ||
+    provider === 'doubao' ||
+    provider === 'ark'
   ) {
     return 'openai-compatible';
   }
@@ -66,7 +109,7 @@ function normalizeProvider(raw = process.env.AUTOARTICLE_LLM_PROVIDER): LlmProvi
     return 'openai-responses';
   }
   throw new Error(
-    `AUTOARTICLE_LLM_PROVIDER="${raw}" 不支持。可用值：claude-cli / codex-cli / openai-compatible / openai-responses`,
+    `模型 provider "${raw}" 不支持。可用值：claude-cli / codex-cli / openai-compatible / openai-responses（也接受简写 mimo / doubao / ark）`,
   );
 }
 
@@ -77,30 +120,28 @@ function trimTrailingSlash(url: string): string {
 function resolveApiConfig(provider: Exclude<LlmProvider, 'claude-cli'>, requestedModel?: string): ApiStreamConfig {
   const isResponses = provider === 'openai-responses';
   const baseUrl = trimTrailingSlash(
-    process.env.AUTOARTICLE_LLM_BASE_URL ||
-      process.env.OPENAI_BASE_URL ||
-      (isResponses ? 'https://api.openai.com/v1' : 'http://127.0.0.1:1234/v1'),
+    firstNonEmpty(
+      envStr(...AGENT_BASE_URL_KEYS),
+      isResponses ? 'https://api.openai.com/v1' : 'http://127.0.0.1:1234/v1',
+    )!,
   );
-  const apiKey = process.env.AUTOARTICLE_LLM_API_KEY || process.env.OPENAI_API_KEY || '';
+  const apiKey = envStr(...AGENT_API_KEY_KEYS) ?? '';
   const modelFromRequest =
     requestedModel && requestedModel !== ARTICLE_MODEL ? requestedModel : '';
   const model =
     modelFromRequest ||
-    (requestedModel === ARTICLE_MODEL
-      ? process.env.AUTOARTICLE_LLM_ARTICLE_MODEL || process.env.AUTOARTICLE_ARTICLE_MODEL || ''
-      : '') ||
-    process.env.AUTOARTICLE_LLM_MODEL ||
-    process.env.OPENAI_MODEL ||
+    (requestedModel === ARTICLE_MODEL ? envStr(...AGENT_ARTICLE_MODEL_KEYS) ?? '' : '') ||
+    envStr(...AGENT_MODEL_KEYS) ||
     '';
 
   if (!model) {
     throw new Error(
-      '本机 API 模型未配置：请在 .env.local 设置 AUTOARTICLE_LLM_MODEL，正文可另设 AUTOARTICLE_LLM_ARTICLE_MODEL',
+      'API 模型未配置：请在 .env.local 设置 BYTRACE_AGENT_MODEL（正文可另设 BYTRACE_AGENT_ARTICLE_MODEL）。旧名 AUTOARTICLE_LLM_MODEL / OPENAI_MODEL 仍然兼容',
     );
   }
   if (isResponses && !apiKey) {
     throw new Error(
-      'OpenAI Responses API 需要 API key：请在 .env.local 设置 OPENAI_API_KEY 或 AUTOARTICLE_LLM_API_KEY',
+      'OpenAI Responses API 需要 API key：请在 .env.local 设置 BYTRACE_AGENT_API_KEY（旧名 AUTOARTICLE_LLM_API_KEY / OPENAI_API_KEY 仍兼容）',
     );
   }
   return { provider, baseUrl, apiKey, model };
@@ -303,10 +344,10 @@ function resolveCodexModel(requestedModel?: string): string | null {
   return (
     modelFromRequest ||
     (requestedModel === ARTICLE_MODEL
-      ? process.env.AUTOARTICLE_LLM_ARTICLE_MODEL || process.env.AUTOARTICLE_CODEX_ARTICLE_MODEL || ''
+      ? envStr(...AGENT_ARTICLE_MODEL_KEYS) ?? envStr(...CODEX_ARTICLE_MODEL_KEYS) ?? ''
       : '') ||
-    process.env.AUTOARTICLE_LLM_MODEL ||
-    process.env.AUTOARTICLE_CODEX_MODEL ||
+    envStr(...AGENT_MODEL_KEYS) ||
+    envStr(...CODEX_MODEL_KEYS) ||
     null
   );
 }
@@ -338,7 +379,7 @@ function streamCodexCli(
       '--sandbox',
       'read-only',
       '-C',
-      process.env.AUTOARTICLE_CODEX_CWD || '/tmp',
+      envStr(...CODEX_CWD_KEYS) || '/tmp',
     ];
     const model = resolveCodexModel(requestedModel);
     if (model) args.push('--model', model);
@@ -346,7 +387,7 @@ function streamCodexCli(
 
     let proc: ChildProcessWithoutNullStreams;
     try {
-      proc = spawn(process.env.AUTOARTICLE_CODEX_BIN || 'codex', args, {
+      proc = spawn(envStr(...CODEX_BIN_KEYS) || 'codex', args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: process.env,
       });
@@ -559,7 +600,19 @@ function streamClaudeCli(
     }
 
     let proc: ChildProcessWithoutNullStreams;
-    let usedFallback = false;
+    /**
+     * 已尝试过的 CLI 命令。原来是「primary + 1 个硬编码 fallback」，
+     * 现在改成遍历 CLAUDE_BIN_CANDIDATES（含 $HOME 推导的路径），
+     * 这样换电脑/换安装方式都能自动找到，不需要改代码。
+     */
+    const triedCmds = new Set<string>();
+    /** 下一个尚未尝试的候选；没有则返回 null。 */
+    const nextCandidate = (): string | null => {
+      for (const c of [claudeBin, ...CLAUDE_BIN_CANDIDATES]) {
+        if (c && !triedCmds.has(c)) return c;
+      }
+      return null;
+    };
 
     const cliArgs = [
       '-p',
@@ -580,7 +633,8 @@ function streamClaudeCli(
       });
     };
 
-    const primaryCmd = claudeBin ?? 'claude';
+    const primaryCmd = claudeBin ?? CLAUDE_BIN_CANDIDATES.find((c) => c === 'claude' || existsSync(c)) ?? 'claude';
+    triedCmds.add(primaryCmd);
     try {
       proc = trySpawn(primaryCmd);
     } catch (err) {
@@ -724,27 +778,32 @@ function streamClaudeCli(
 
       p.on('error', (err: NodeJS.ErrnoException) => {
         if (p !== proc) return; // 已切到 fallback，旧进程事件作废
-        // ENOENT -> claude not in PATH, try the known fallback once.
-        if (
-          err.code === 'ENOENT' &&
-          !usedFallback &&
-          !claudeBin &&
-          existsSync(FALLBACK_CLAUDE_PATH)
-        ) {
-          usedFallback = true;
-          try {
-            proc = trySpawn(FALLBACK_CLAUDE_PATH);
-            attachHandlers(proc);
-            writePromptAsJsonLine(proc);
-            return;
-          } catch (fallbackErr) {
-            settleReject(
-              new Error(
-                `claude not found in PATH and fallback ${FALLBACK_CLAUDE_PATH} also failed: ${(fallbackErr as Error).message}`,
-              ),
-            );
-            return;
+        // ENOENT -> 按 CLAUDE_BIN_CANDIDATES 顺序继续试下一个候选
+        if (err.code === 'ENOENT') {
+          const next = nextCandidate();
+          if (next) {
+            triedCmds.add(next);
+            try {
+              proc = trySpawn(next);
+              attachHandlers(proc);
+              writePromptAsJsonLine(proc);
+              return;
+            } catch (fallbackErr) {
+              settleReject(
+                new Error(
+                  `claude 启动失败：已试过 ${[...triedCmds].join(', ')}，最后一个报错 ${(fallbackErr as Error).message}`,
+                ),
+              );
+              return;
+            }
           }
+          settleReject(
+            new Error(
+              `找不到 claude CLI。已试过：${[...triedCmds].join(', ')}。` +
+                `请安装 Claude Code CLI，或在 .env.local 里用 BYTRACE_CLAUDE_BIN 指定完整路径。`,
+            ),
+          );
+          return;
         }
         settleReject(
           new Error(

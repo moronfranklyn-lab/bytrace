@@ -487,16 +487,48 @@ curl -sS -o /dev/null -w "%{http_code}\n" http://localhost:3100/
 
 #### 6.1.5 原生模块缺失 / `better-sqlite3` 加载失败
 
+> **⚠️ 2026-09-24 实测补充：本机真实踩过这个坑**
+> 本机 PATH 上的 `node` 有**两套不一致的解释器**：
+> 1. DSH Desktop 内置的 `node`，`--version` 报 **v24.18.1**，但它的真实 `NODE_MODULE_VERSION` 是 **137**；
+> 2. nvm 的 **v22.23.2**（`~/.nvm/versions/node/v22.23.2`），ABI **127**。
+>
+> 而 `better-sqlite3` 的预编译二进制是 ABI **115**（更老的 Node 22 线）。三者互不匹配，表现就是
+> `NODE_MODULE_VERSION 115 / 127 / 137 vs 148` 反复报错，且**用内置 node 编译出来的产物在它自己身上也加载不了**（版本号与 ABI 不一致）。
+>
+> **可用的做法**：统一用 **nvm 的 Node 22.23.2** 跑服务与编译：
+>
+> ```bash
+> export PATH="$HOME/.nvm/versions/node/v22.23.2/bin:$PATH"
+> node --version        # 确认 v22.23.2（ABI 127）
+> node -p process.versions.modules
+> npm rebuild better-sqlite3
+> node -e "const D=require('better-sqlite3'); new D('data/autoarticle.db',{readonly:true}); console.log('OK')"
+> ```
+>
+> **沙箱/受限环境下 `npm rebuild` 会被拒**：node-gyp 默认写 `~/Library/Caches/node-gyp` 与 `~/.npm/_logs`。
+> 若这两个目录不可写，把缓存放进项目内再编译：
+>
+> ```bash
+> cd /path/to/autoarticle
+> mkdir -p .cache/node-gyp .cache/npm
+> export npm_config_devdir="$PWD/.cache/node-gyp"
+> export npm_config_cache="$PWD/.cache/npm"
+> npm rebuild better-sqlite3
+> ```
+>
+> （`.cache/` 已加进 `.gitignore`，不会进版本库。）
+
 | 项 | 内容 |
 | --- | --- |
 | **症状** | 启动或首次访问报 `Cannot find module '.../better_sqlite3.node'`、`was compiled against a different Node.js version`、`invalid ELF/Mach-O header`、`NODE_MODULE_VERSION` 不匹配 |
-| **原因** | ① `node_modules` 没装全；② 装依赖时的 **Node 大版本和现在运行的 Node 不一致**（原生模块 ABI 绑定具体 Node 版本）；③ 从别的机器整个复制了 `node_modules`；④ Node 太新，没有对应预编译产物且本机缺编译工具链 |
-| **处理** | 用当前 Node 重装 |
+| **原因** | ① `node_modules` 没装全；② 装依赖时的 **Node 大版本和现在运行的 Node 不一致**（原生模块 ABI 绑定具体 Node 版本）；③ 从别的机器整个复制了 `node_modules`；④ Node 太新，没有对应预编译产物且本机缺编译工具链；⑤ **机器上存在多个来源的 Node，`node --version` 与实际 ABI 不一致**（本机实测情况） |
+| **处理** | 先确认 `node -p process.versions.modules` 得到的 ABI 与报错里"requires"一致，再用**同一个解释器**重装 |
 
 ```bash
 cd /path/to/autoarticle
 
 node --version                     # 记下当前版本
+node -p process.versions.modules   # ★ 关键：确认实际 ABI，别只看版本号
 rm -rf node_modules package-lock.json.bak
 npm install                        # better-sqlite3 会按当前 Node 重新编译/下载（分钟级）
 

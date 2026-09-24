@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { HomeNav } from '@/components/nav/HomeNav';
 import { TopicTabs } from '@/components/home/TopicTabs';
 import { listRecentFingerprints, type FingerprintListItem } from '@/lib/fingerprint-queries';
+import { countLocalAssets } from '@/lib/images/local';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -59,6 +60,13 @@ const AVATAR_GRADIENTS = [
 
 export default async function HomePage() {
   const recent: FingerprintListItem[] = listRecentFingerprints(4);
+  // 素材数量取真实值，不写死文案（否则界面会与数据库不一致）
+  let assetCount = 0;
+  try {
+    assetCount = countLocalAssets();
+  } catch {
+    assetCount = 0;
+  }
 
   return (
     <>
@@ -263,12 +271,12 @@ export default async function HomePage() {
               </div>
               <h3 className="feature-title">素材库 · 配图风格</h3>
               <p className="feature-desc">
-                本地已有 247 张配图，按博主风格自动打标。可用免费图库（Unsplash/Pexels）<strong>补全缺类</strong>，也支持指定网站爬图建库。
+                本地素材库按博主风格自动打标。可用免费图库<strong>补全缺类</strong>，也支持指定网站爬图建库。
               </p>
               <div className="feature-meta">
                 <span>ASSET LIBRARY</span>
                 <span>·</span>
-                <span>247 张</span>
+                <span>{assetCount} 张</span>
               </div>
             </Link>
           </div>

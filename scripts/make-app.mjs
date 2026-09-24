@@ -10,7 +10,7 @@
  * 用 Node 生成可以完全避免转义问题。
  */
 
-import { mkdirSync, writeFileSync, chmodSync, existsSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, chmodSync, existsSync, rmSync, copyFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -30,6 +30,7 @@ const PLIST = `<?xml version="1.0" encoding="UTF-8"?>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>launch</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
@@ -84,5 +85,17 @@ writeFileSync(launchPath, LAUNCH, 'utf8');
 chmodSync(launchPath, 0o755);
 
 writeFileSync(join(appPath, 'Contents', 'Resources', 'project-path'), root, 'utf8');
+
+// 应用图标：从 build/AppIcon.icns 复制进来。
+// 若尚未生成，提示跑一次 scripts/make-icns.py，但不阻断——没有图标也能启动。
+const icnsSrc = join(root, 'build', 'AppIcon.icns');
+if (existsSync(icnsSrc)) {
+  copyFileSync(icnsSrc, join(appPath, 'Contents', 'Resources', 'AppIcon.icns'));
+} else {
+  console.warn(
+    '[make-app] 未找到 build/AppIcon.icns，将使用系统默认图标。\n' +
+    '           生成方法：python3 scripts/make-icns.py',
+  );
+}
 
 console.log(appPath);

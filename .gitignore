@@ -44,3 +44,6 @@ dist/
 
 # 启动器日志
 .bytrace-dev.log
+
+# 生成物：图标稿与打包中间文件（可由 scripts/make-icns.py 重新生成）
+build/

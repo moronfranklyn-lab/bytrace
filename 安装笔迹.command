@@ -153,6 +153,20 @@ echo ""
 # ---------------------------------------------------------------------------
 step "5/5  启动图标"
 
+# 先生成应用图标（需要 Python3 + Pillow；缺了就跳过，用系统默认图标，不阻断安装）
+if [ -f scripts/make-icns.py ]; then
+  if command -v python3 >/dev/null 2>&1 && python3 -c "import PIL" >/dev/null 2>&1; then
+    if python3 scripts/make-icns.py >/dev/null 2>&1 && [ -f build/AppIcon.icns ]; then
+      ok "应用图标已生成"
+    else
+      warn "图标生成失败，将使用系统默认图标（不影响使用）"
+    fi
+  else
+    warn "缺少 Python3 或 Pillow，跳过图标生成（不影响使用）"
+    echo "${DIM}  需要图标时执行：pip3 install Pillow && python3 scripts/make-icns.py${RESET}"
+  fi
+fi
+
 # 用 Node 脚本生成 .app 包（内含 plist 与启动脚本，避免 shell 引号转义问题）
 APP_SRC="$PROJECT_DIR/dist/$APP_NAME.app"
 if "$BOOTSTRAP_NODE" scripts/make-app.mjs "$PROJECT_DIR/dist" >/dev/null 2>&1; then

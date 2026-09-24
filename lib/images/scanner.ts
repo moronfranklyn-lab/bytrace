@@ -2,13 +2,24 @@ import { readdirSync, statSync } from 'node:fs';
 import { extname, join, basename, relative, dirname, sep } from 'node:path';
 import { nanoid } from 'nanoid';
 import { getDb } from '@/lib/db';
+import { envStr } from '@/lib/env';
 
 /**
- * Default location of Ethan's local image library on his machine.
- * The scanner uses this when no explicit path is passed.
+ * 默认素材库根目录。
+ *
+ * 解析顺序：
+ *   1. BYTRACE_ASSETS_ROOT（推荐：在 .env.local 指定自己的图片目录）
+ *   2. <repo>/data/assets（仓库内自带的素材目录，开箱可用）
+ *
+ * 不硬编码任何机器路径，因此在别人的电脑上也能直接跑起来。
  */
-export const DEFAULT_LOCAL_ASSETS_ROOT =
-  '/Users/mixingtumima0000/资料合集/项目合集/公众号/公众号配图';
+export function defaultLocalAssetsRoot(): string {
+  const configured = envStr('BYTRACE_ASSETS_ROOT');
+  if (configured) return configured;
+  return join(process.cwd(), 'data', 'assets');
+}
+
+export const DEFAULT_LOCAL_ASSETS_ROOT = defaultLocalAssetsRoot();
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
 

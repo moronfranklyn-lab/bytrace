@@ -1,18 +1,16 @@
 # 笔迹 ByTrace · API 契约
 
-> 本文档由**逐文件阅读 `app/api/**/route.ts` 源码**产出，不依赖任何既有设计文档的二手描述。
-> 每一项字段、状态码、错误字符串、SSE 事件名都以源码为准。
-> 生成基准：工作区当前磁盘状态（`find app/api -name route.ts | sort` → **32 个** route 文件）。
+> 版本：v1.0 · 更新：2026-06-30
+> 对应代码：笔迹 ByTrace 写作引擎
 
 ## 0. 怎么读这份文档
 
 1. **先看 §1 端点索引表**定位你要找的路由，再跳到对应章节看细节。
 2. **§2–§9 每个路由一节**，结构固定：方法 / 请求 / 响应 / 错误 / 运行时常量。
 3. **§10 是 SSE 事件总表**（所有流式路由的事件名 → payload → 触发时机），做前端接线时直接查这一节最快。
-4. **§11 已知不一致 / 待核实**列出「源码与既有文档（AGENTS.md / CLAUDE.md）冲突」和「本次无法确认」的点。**做实现前请先扫一遍这一节**。
-5. 凡是本次**无法从源码确认**的内容，一律写作 `待核实`，不做推测。
+4. **附录「实现约定与注意事项」**汇总跨路由的公共约定与维护时必须知道的约束，改动相关代码前建议先扫一遍。
 
-### 通用约定（全部 32 个路由一致，除特别注明）
+### 通用约定（本文档覆盖的 34 个路由一致，除特别注明）
 
 | 约定 | 事实 |
 |---|---|
@@ -28,7 +26,7 @@
 | 数据库 | 全部走 `lib/db.ts` 的 `getDb()` 单例（better-sqlite3，同步 API）。 |
 | 模型调用 | 全部走 `lib/claude.ts` 的 `streamClaude()`（本机 Claude Code CLI 订阅，不接 Anthropic API）。 |
 
-#### 错误形状例外表（**不是** `{ error: string }** 的路由）
+#### 错误形状例外表（不是 `{ error: string }` 的路由）
 
 | 路由 | 实际形状 | 说明 |
 |---|---|---|
@@ -85,13 +83,15 @@
 | POST | `/api/assets/scan` | `app/api/assets/scan/route.ts` | — | 扫描素材目录入库（**有 root 白名单**） |
 | GET | `/api/assets/scan` | `app/api/assets/scan/route.ts` | — | 查当前素材库总数 + 默认根目录 |
 | GET | `/api/assets/file` | `app/api/assets/file/route.ts` | — | 按 `local_assets.id` 流式读图（不接受路径，防任意文件读） |
-| POST | `/api/scan-assets` | `app/api/scan-assets/route.ts` | — | 扫描指定目录入库（**无白名单**，见 §11） |
+| POST | `/api/scan-assets` | `app/api/scan-assets/route.ts` | — | 扫描指定目录入库（**无白名单**，见附录 · 附.2） |
 | POST | `/api/tag-assets` | `app/api/tag-assets/route.ts` | — | 批量 Claude 视觉打标（串行，`maxDuration=300`） |
 | GET | `/api/settings` | `app/api/settings/route.ts` | — | 列出全部 k/v 设置 |
 | PATCH | `/api/settings` | `app/api/settings/route.ts` | — | 写设置（白名单仅 `default_theme`） |
 | POST | `/api/crawl-preview` | `app/api/crawl-preview/route.ts` | — | 单 URL 试爬 / 拉作者文章列表 |
 | GET | `/api/search-authors` | `app/api/search-authors/route.ts` | — | 博主名搜索（DDG / Google CSE） |
 | POST | `/api/import/wechat-draft` | `app/api/import/wechat-draft/route.ts` | — | 公众号草稿箱草稿导入为历史文章 |
+| GET | `/api/health` | `app/api/health/route.ts` | — | 运行自检：各任务组配置状态 + 数据库连通性（只报有无，不回显密钥） |
+| GET | `/api/health/search` | `app/api/health/search/route.ts` | — | 联网搜索联通性实测：逐通道回报命中数 / 耗时 / 失败原因 |
 
 ---
 
@@ -429,7 +429,7 @@ interface ReqBody {
 - 新样本**先写库再跑模型**（即使模型挂了也留住样本）。
 - 累计样本取 `ORDER BY added_at DESC LIMIT 20` 重新喂 stage1/2/3。
 - 老样本若 DB 里没有分类，会由 Stage 0 重跑补分类并**回写** `fingerprint_articles`。
-- 写回时：`strategies` 整组删重建；`strategy_fragments_indexed` 全局碎片整组覆盖、类别碎片**只删本次成功合成的类**（失败类保留旧行）；`fingerprint_category_profiles` 用 `INSERT OR REPLACE`（不做无条件全删）。
+- 写回时：`strategies` 整组删重建；`strategy_fragments_indexed` 全局碎片整组覆盖、类别碎片**只删该次成功合成的类**（失败类保留旧行）；`fingerprint_category_profiles` 用 `INSERT OR REPLACE`（不做无条件全删）。
 - `UPDATE fingerprints SET ... iteration_count = COALESCE(iteration_count, 1) + 1`。
 
 ---
@@ -601,7 +601,7 @@ interface IncomingPayload {
 
 #### 副作用
 
-插入**新** `fingerprints` 行：`version = oldVersion + 1`、`parent_id = latestFp.id`、`article_count = oldCount + 本次篇数`、`model_version = 'claude-code-cli'`（**不带 v2/v3 后缀，且不写 `version_schema`**）→ 见 §11。
+插入**新** `fingerprints` 行：`version = oldVersion + 1`、`parent_id = latestFp.id`、`article_count = oldCount + 新增篇数`、`model_version = 'claude-code-cli'`（**不带 v2/v3 后缀，且不写 `version_schema`**，见附录 · 附.4）。
 `source_articles_json` 为「旧 + 新」合并；回填 `crawled_articles.used_in_fingerprint_id`（仅当原本为 NULL）；更新 `authors.last_used_at`。
 
 ---
@@ -742,7 +742,7 @@ interface Outline {
 
 源文件：`app/api/compose/gather/route.ts` · 导出函数：`POST` · 流式：SSE(helper)
 
-> **没有 GET 处理函数。** 缓存查询发生在 POST 内部（按 `idea_hash`）。见 §11。
+> **没有 GET 处理函数。** 缓存查询发生在 POST 内部（按 `idea_hash`）。见附录 · 附.5。
 
 #### 请求
 
@@ -834,7 +834,7 @@ interface IncomingPayload {
 
 常量：`MIN_IDEA_CHARS = 30`、`PER_PLATFORM_TIMEOUT_MS = 480_000`。
 critic：`CRITIC_MAX_ATTEMPTS = 3`（关 critic 时为 1）、`CRITIC_PASS_THRESHOLD = 20`（5 维 × 满分 5 = 25）。
-正文用 `ARTICLE_MODEL`（Sonnet 4.6）；critic 不传 model（走 CLI 默认）。
+正文走 `ARTICLE_MODEL` 别名，映射到**正文档位**（`BYTRACE_AGENT_ARTICLE_MODEL`，未配置则回退主 Agent 模型）；critic 以 `task='review'` 调用，走**审查模型分组**（`BYTRACE_REVIEW_*`，未配置则继承主 Agent）。
 
 #### 响应（SSE，按代码可发射顺序）
 
@@ -1103,7 +1103,7 @@ interface RefineVersionEntry {
 
 `recrawl` 会带 `skipHashes = 已有 site_articles.url_hash`，`maxArticles = 50`、`maxPages = 10`，并把 `{ recentDays: 31 }` 传给 `fetchArticlesWithDedupe`。
 
-**200 分支 A**（本轮无新增，不调模型）：
+**200 分支 A**（无新增样本，不调模型）：
 
 ```ts
 {
@@ -1470,7 +1470,7 @@ Array<{ keyword: string; count: number; sample_titles: string[] }>   // sample_t
 
 源文件：`app/api/articles/[id]/route.ts` · 导出函数：`GET`、`DELETE`
 
-> 注意：是 `GET` + `DELETE`，**没有 POST**（既有文档写的是「GET/POST」，见 §11）。
+> 只导出 `GET` + `DELETE`，**没有 POST**。
 
 #### `GET`
 
@@ -1584,7 +1584,7 @@ Array<{ keyword: string; count: number; sample_titles: string[] }>   // sample_t
 
 源文件：`app/api/images/auto/route.ts` · 导出函数：`POST` · **非流式**（注释明确：「故意不做 SSE —— 整个流程通常 < 1 分钟」）
 
-> **没有 GET 处理函数**（既有文档写的是「GET/POST」，见 §11）。
+> **没有 GET 处理函数**，只导出 `POST`。
 
 #### 请求
 
@@ -1648,7 +1648,7 @@ interface AutoRequest {
 | 502 | `模型这次输出不是合法 JSON，再点一次自动配图大概率就好` | `{ phase: 'parse', detail, sample }` |
 | 502 | `模型没给出有效的图意 slot` | `{ phase: 'parse' }` |
 
-模型调用：`streamClaude(prompt, { timeoutMs: 120_000, model: 'sonnet' })`（`model` 是字面量 `'sonnet'`，见 §11）。
+模型调用：`streamClaude(prompt, { timeoutMs: 120_000, model: 'sonnet' })`（`model` 是硬编码字面量 `'sonnet'`）。
 
 ---
 
@@ -1709,7 +1709,7 @@ interface ScanRequest {
 
 | 允许根 | 实际值 |
 |---|---|
-| 默认素材根 | `resolve(DEFAULT_LOCAL_ASSETS_ROOT)` = `/Users/mixingtumima0000/资料合集/项目合集/公众号/公众号配图`（`lib/images/scanner.ts` 硬编码） |
+| 默认素材根 | `DEFAULT_LOCAL_ASSETS_ROOT` —— 取 `BYTRACE_ASSETS_ROOT`，未配置则 `<repo>/data/assets` |
 | 图片 | `resolve(homedir(), 'Pictures')` |
 | 桌面 | `resolve(homedir(), 'Desktop')` |
 | 下载 | `resolve(homedir(), 'Downloads')` |
@@ -1769,7 +1769,7 @@ interface ScanRequest {
 | Header | 值 |
 |---|---|
 | `Content-Type` | 按扩展名映射：`.jpg`/`.jpeg` → `image/jpeg`，`.png` → `image/png`，`.webp` → `image/webp`，`.gif` → `image/gif`，其它 → `application/octet-stream` |
-| `Content-Length` | 磁盘 `stat.size` |
+| `Content-Length` | 文件的 `stat.size` |
 | `Cache-Control` | `private, max-age=300` |
 
 #### 错误（**纯文本**，非 JSON）
@@ -1786,7 +1786,7 @@ interface ScanRequest {
 
 源文件：`app/api/scan-assets/route.ts` · 导出函数：`POST`
 
-> ⚠️ 与 `/api/assets/scan` 功能重叠，但**没有 root 白名单**，且 500 会回传 `stack`。见 §11。
+> ⚠️ 与 `/api/assets/scan` 功能重叠，但**没有 root 白名单**，且 500 会回传 `stack`。见附录 · 附.2。
 
 #### 请求
 
@@ -1794,13 +1794,15 @@ interface ScanRequest {
 { path?: string }
 ```
 
-空 body 合法。**默认路径硬编码**：
+空 body 合法。**默认路径**按优先顺序解析：
 
 ```
-/Users/mixingtumima0000/资料合集/项目合集/公众号/公众号配图/2026世界机器人大会
+1. BYTRACE_SCAN_DEFAULT_DIR
+2. ~/Pictures
+3. 当前工作目录
 ```
 
-**任意路径都会被扫描**（无白名单校验）。
+**任意路径都会被扫描**（无白名单校验，与 `/api/assets/scan` 的差异见附录 · 附.2）。
 
 #### 响应
 
@@ -1917,8 +1919,6 @@ const VALUE_VALIDATORS = {
 | 400 | `key={key} 的取值 {value} 不在允许范围内` |
 | 500 | `{ error: (err as Error).message }`（写入失败） |
 
-**`apify_token` 已不在白名单内**（既有文档说白名单是 `default_theme` + `apify_token`，见 §11）。
-
 ---
 
 ### 9.2 `POST /api/crawl-preview`
@@ -1999,8 +1999,6 @@ interface ReqBody {
 | 400 | `请求体不是合法 JSON` |
 | 400 | `URL 不能为空` |
 
-**响应里没有 `apify_cost_usd` 字段**（既有文档声称有，见 §11）。
-
 ---
 
 ### 9.3 `GET /api/search-authors`
@@ -2075,6 +2073,123 @@ interface ImportRequest {
 | 500 | `{ error: '导入失败: {msg}' }` |
 
 单条草稿的循环内异常不中断整体，记进 `errors`。
+
+---
+
+### 9.5 `GET /api/health`
+
+源文件：`app/api/health/route.ts` · 导出函数：`GET` · 声明：`runtime='nodejs'`、`dynamic='force-dynamic'`
+
+运行自检端点。一次请求回答「现在到底配好了没有、哪儿没配」。
+
+**设计约定**：
+
+- **永远返回 200**。某一项不可用属于可诊断信息，不是请求失败。
+- **只报告状态，绝不回显任何密钥**（只给布尔值与变量名，不给值本身）。
+- `ok` 的含义是「**主 Agent 与数据库都就绪**」，即工具能不能干活的最低门槛；审查模型与联网搜索缺失不影响 `ok`。
+
+**200**：
+
+```ts
+{
+  ok: boolean;
+  checked_at: string;              // ISO 时间戳
+  summary: string;                 // 一句话结论
+  checks: Array<{
+    key: 'agent' | 'review' | 'search' | 'database' | 'data_dir' | 'images';
+    label: string;
+    status: 'ready' | 'missing' | 'unavailable' | 'not-needed';
+    detail: string;                // 当前值的人类可读描述（不含密钥）
+    fix?: string;                  // 未就绪时给出可操作的修复提示
+  }>;
+  debug: {
+    cwd: string;
+    node: string;                  // process.version
+    claude_bin_resolved: string;
+    claude_bin_candidates: string[];
+    agent_provider: string;
+    agent_is_local_cli: boolean;
+    agent_is_mimo: boolean;
+    search_provider: string;
+    search_doubao_ready: boolean;
+    search_mimo_ready: boolean;
+  };
+}
+```
+
+**`status` 语义**：
+
+| 值 | 含义 |
+|---|---|
+| `ready` | 已配置且可用 |
+| `missing` | 必填项缺失（带 `fix` 指明填哪个变量） |
+| `unavailable` | 已配置但不可用（例如 CLI 文件找不到、数据库打不开） |
+| `not-needed` | 可选项未配置，不影响主流程 |
+
+**检查项说明**：
+
+| key | 判什么 |
+|---|---|
+| `agent` | 主 Agent。本机 CLI 模式看可执行文件是否存在；API 模式看端点 / key / 模型是否齐全 |
+| `review` | 审查模型。区分「跨模型互审（独立配置）」与「继承主 Agent」两种状态 |
+| `search` | 联网事实搜索。按 `provider=auto` 推导出**实际会走的通道**，并列出全部可用通道 |
+| `database` | 数据库能否打开 + 三张主表的行数 |
+| `data_dir` | 当前数据目录位置及来源 |
+| `images` | 配图来源（本地素材库 / 免费图库） |
+
+---
+
+### 9.6 `GET /api/health/search`
+
+源文件：`app/api/health/search/route.ts` · 导出函数：`GET` · 声明：`runtime='nodejs'`、`dynamic='force-dynamic'`、`maxDuration=120`
+
+与 `/api/health` 的区别：**这个端点真的会去打一次联网搜索**。
+
+| 端点 | 是否发网络请求 | 耗时 | 用途 |
+|---|---|---|---|
+| `/api/health` | 否 | 秒回 | 只检查「配了没有」 |
+| `/api/health/search` | **是** | 十几秒起 | 检查「通不通」，并回报每条通道的实际结果 |
+
+**Query**：
+
+| 参数 | 必填 | 默认 | 说明 |
+|---|---|---|---|
+| `q` | 否 | `2026 年 AI 产品经理 行业趋势` | 搜索关键词 |
+
+**200**：
+
+```ts
+{
+  ok: boolean;                     // 是否至少有一条通道成功
+  query: string;
+  preferred_provider: string;      // 配置里指定的通道（auto / mimo / doubao / …）
+  effective_provider: string | null; // 实际第一个成功的通道
+  summary: string;
+  config: {
+    doubao_ready: boolean;
+    mimo_ready: boolean;
+    tavily_ready: boolean;
+    google_cse_ready: boolean;
+    web_facts_fallback_ready: boolean;  // 恒为 true（免密钥兜底）
+  };
+  probes: Array<{
+    provider: string;
+    label: string;
+    attempted: boolean;            // 未配置则为 false
+    ok: boolean;
+    hitCount: number;
+    elapsedMs: number;
+    error?: string;                // 已脱敏
+    pluginDisabled?: boolean;      // 命中「联网插件未开启」这类可操作原因
+    samples: Array<{ title: string; host: string }>;  // 前 3 条，只给标题与域名
+  }>;
+  note: string;
+}
+```
+
+**设计约定**：逐条通道独立试、任一成功即可用；某条失败不会导致整体报错。输出不含任何密钥，来源样本也只给标题与域名，不给全文。
+
+> 注意：调用一次会消耗一次搜索额度。这是**排错接口**，不是给日常流程反复调用的。
 
 ---
 
@@ -2185,58 +2300,66 @@ interface ImportRequest {
 
 ---
 
-## 11. 已知不一致 / 待核实
+## 附：实现约定与注意事项
 
-### 11.1 源码与既有文档（AGENTS.md / CLAUDE.md）冲突
+### 附.1 跨路由公共约定
 
-| # | 既有文档说 | 源码事实 | 影响 |
-|---|---|---|---|
-| 1 | 路由约 **34** 个 | 磁盘上 **32** 个 route.ts | 索引与覆盖范围以此文档为准 |
-| 2 | `GET /api/apify/usage`（Apify 余额 + 最近 20 run） | **文件不存在**。`git status` 显示 ` D app/api/apify/usage/route.ts`，同批删除的还有 `lib/apify/usage.ts`、`lib/crawler/apify.ts`、`components/nav/ApifyStatusPill.tsx` | Apify 额度查询与前端 status pill 在源码里整体不存在 |
-| 3 | `POST /api/research` + `/research` 页面（深度调研链路） | **不存在**。` D app/api/research/route.ts`、` D app/research/page.tsx`、` D lib/research.ts`、` D lib/codex.ts`、` D lib/prompts/research.ts` | 文档里整节「深度调研流程 v4」对应的代码已被删除 |
-| 4 | `/api/settings` 白名单是 `default_theme` + `apify_token` | `ALLOWED_KEYS = new Set(['default_theme'])`。文件顶部注释也写「当前只接受白名单内的 key（default_theme）」 | **PATCH `apify_token` 会返回 400 `不允许写入 key=apify_token`**；紧急手册里「在设置页清空 DB 里的 token」这一步已失效 |
-| 5 | `POST /api/compose/gather` 另有 GET 按 `idea_hash` 查缓存 | **文件里只有 `POST`**，没有任何 `GET` 导出 | 想拿缓存只能调 POST，缓存命中会走 `cached` + `done` 事件 |
-| 6 | `/api/images/auto` 是 `GET/POST`，且 `/api/crawl-preview` 返回 `apify_cost_usd` | `images/auto` 只有 `POST`；`crawl-preview` 响应里**没有** `apify_cost_usd` 字段 | 前端不应依赖这两个形状 |
-| 7 | `/api/articles/[id]` 是 `GET/POST` | 实际导出 `GET` + `DELETE` | — |
-| 8 | 「所有流式调用都带心跳」 | 心跳只属于 `lib/sse.ts` 的 `createSseStream`。**6 个手写流路由没有心跳**：fingerprint v1/v2/v3、authors/optimize、topics/recommend、topics/trending | 这些路由长时间无输出时可能被中间层断连；且没有终局 `error` 兜底 |
-| 9 | `fingerprint/v3` 发 `phase` 事件；`topics/recommend` 有 `phase` 事件 | v3 发的是 **`stage`**（v2 才用 `phase`）；`topics/recommend` **不发射 `phase`**（只有 `topics/trending` 会发） | 前端事件名必须按本文件 §10 |
-| 10 | `lib/codex.ts` 负责 gather 的联网搜集 | `lib/codex.ts` 已删除；`gather` 走 `streamClaude` + `lib/search/mimo-web-search` / `lib/search/web-facts` | 「codex 搜集」描述与代码不符 |
-| 11 | v3 `fingerprint_articles` 去重口径 | URL 模式用 `hashUrl(url)`；**paste 模式用 `sha1(正文前 200 字)`**。同一篇正文改开头 200 字即会被当作新样本 | 反复粘贴相近正文可能累积重复样本 |
+- 本文档覆盖的 34 个 route 都声明 `export const runtime = 'nodejs'` 与 `export const dynamic = 'force-dynamic'`。非默认 `maxDuration` 出现在两处：`app/api/tag-assets/route.ts`（300）与 `app/api/health/search/route.ts`（120）。
+- SSE 心跳只由 `lib/sse.ts` 的 `createSseStream()` 提供（`: heartbeat`，每 10s 检查、空闲超过 15s 才发）。6 个手写流路由**没有心跳**：`fingerprint`(v1)、`fingerprint/v2`、`fingerprint/v3`、`authors/[id]/optimize`、`topics/recommend`、`topics/trending`。这些路由长时间无输出时可能被中间层断连，也没有 helper 那条终局 `error` 兜底。
+- 事件名以 §10 为准：`fingerprint/v3` 发的是 `stage`（v2 才用 `phase`）；`topics/recommend` **不**发射 `phase`（只有 `topics/trending` 发）。
+- 错误响应正常不泄漏堆栈，只回 `(err as Error).message`。例外：`/api/scan-assets` 的 500 带 `stack`；`/api/compose/draft` 只把 stack 打到服务端 console。
+- 响应 JSON 的 key 一律 `snake_case`；数据库访问统一走 `lib/db.ts` 的 `getDb()` 单例（better-sqlite3，同步 API）；模型调用统一走 `lib/claude.ts` 的 `streamClaude()`。
 
-### 11.2 代码内部不一致（同一项目里两套做法）
+### 附.2 素材扫描端点
 
-| # | 现象 | 具体位置 |
-|---|---|---|
-| 1 | **`stripJsonFence` 有两套实现** | `lib/sse.ts` 导出；但 `fingerprint/route.ts`、`fingerprint/v2`、`fingerprint/v3`、`authors/[id]/optimize`、`topics/recommend`、`topics/trending` 各自又定义了一份本地副本。v3 的本地版多了「fence 结果先 `JSON.parse` 验证，失败回退大括号截取」的增强逻辑，其它副本没有 |
-| 2 | **`pickAvatarChar` 有两套** | `lib/authors/avatar.ts` 已抽出并被 v3 与 `authors/[id]` PATCH 使用，但 `fingerprint/route.ts`（v1）与 `fingerprint/v2` 仍各自内联一份相同实现 |
-| 3 | **`refine_versions_json` 同一路由内两种形态** | `compose/draft` 的**新建**分支写 dict `{[platform]: md}`；同一路由的**复用**分支（`existing_article_id`）写数组。`compose/refine` 与 `articles/[id]/diff` 都靠 `parseRefineVersions()` 兜底归一 |
-| 4 | **`fingerprint/v3` POST 未复用 `v3-engine`** | POST 在路由内自己实现了 Stage 0/1/2/3 + 类别配方（约 380 行），而 `lib/fingerprints/v3-engine.ts` 有同一套逻辑供 PATCH 使用。CLAUDE.md 也记录了这处「复制体漂移」 |
-| 5 | **素材扫描两个端点安全姿态不同** | `/api/assets/scan` 有 `ALLOWED_SCAN_ROOTS` 白名单（403 + 中文提示）；`/api/scan-assets` 接受任意 `path` 且默认值硬编码为 `/Users/mixingtumima0000/…`。`/api/tag-assets` 的 `root` 也无白名单，但会被当 `--add-dir` 传给 Claude CLI |
-| 6 | **`/api/scan-assets` 的 500 回传 `stack`** | 与「不泄漏堆栈」的约定冲突（本项目其它路由只回 `message`） |
-| 7 | **`/api/authors/[id]/optimize` 写库不带版本标记** | 新指纹行 `model_version = 'claude-code-cli'`（v1 风格），**不写 `version_schema`**，但 `version` 递增后成为该 author 的 latest。因为 v3 被 409 拦下，所以只会影响 v1/v2 指纹；不过 v2 指纹经过这条通道后新行会被判成 v1 |
-| 8 | **`sites` 的 `DELETE` 与 `authors` 的级联都不是事务** | `sites/[id]` DELETE 先删 `site_articles` 再删 `sites`（两步非事务）；`articles/[id]` DELETE 也是「先删主体再清关联表」 |
-| 9 | **`GET /api/articles/[id]` SELECT 了 `content_html` 但不返回** | 查询列含 `content_html`，响应对象没有该 key。若前端需要用 HTML 预览，此处是缺口 |
+- `/api/assets/scan` 有 `ALLOWED_SCAN_ROOTS` 白名单（素材根 / 图片 / 桌面 / 下载），越界返回 403 + 中文提示。
+- `/api/scan-assets` 接受任意 `path`，**没有白名单**，默认路径硬编码在路由里。
+- `/api/tag-assets` 的 `root` 同样无白名单，会被当作 Claude CLI 的 `--add-dir` 参数传入。
+- 两个扫描端点功能重叠：需要目录边界保护时用 `/api/assets/scan`。`/api/scan-assets` 的 500 会回传 `stack`，与全局「不泄漏堆栈」的约定不同。
 
-### 11.3 待核实（本次无法从源码确认）
+### 附.3 JSON 清洗与字段形态
 
-| # | 项 | 为什么待核实 |
-|---|---|---|
-| 1 | `streamClaude()` 各选项（`timeoutMs`、`model`、`signal`、`onChunk`）的**精确语义与默认值**，以及 `ARTICLE_MODEL` 的实际值 | 本次未读 `lib/claude.ts`；本文只记录各 route **传入**的值 |
-| 2 | `POST /api/images/auto` 里 `model: 'sonnet'` 是否是 CLI 可识别的合法 model 标识 | 该值是硬编码字面量，未与 `lib/claude.ts` 的取值约定比对 |
-| 3 | `GET /api/search-authors` 的 `AuthorCandidate` 完整字段 | 定义在 `lib/search/`，本次未展开 |
-| 4 | `runProfileExtraction()` 产出的 `profile_json` 完整字段集（`preferred_topics` / `word_count_range` / `tone` / `site_name` / `section` / `url_pattern` / `preferred_structures` / `preferred_depth` / `analogy_density` …） | 由模型输出 + prompt 约束决定，本次未读 `lib/sites/profile-engine.ts` 的 prompt 部分 |
-| 5 | `fingerprint_json`（v1/v2/v3）的完整字段集 | 由 prompt 约束决定；本文只记录 route 会读写的顶层 key（`strategy_fragments` / `platform_fingerprints` / `domain_variations` / `cross_platform_report` / `platforms_analyzed` / `fingerprint_summary` / `author_summary` / `strengths` / `topic` / `language` / `structure` / `visual` / `do_list` / `dont_list` / `verbal_tics`） |
-| 6 | `crawled_articles` / `gather_runs` / `knowledge_base` / `knowledge_base_tags` / `critic_runs` / `article_diffs` / `style_recipes` / `strategy_fragments_indexed` / `fingerprint_articles` / `fingerprint_category_profiles` / `site_articles` 的**完整列定义** | 本次只按 route 的 SQL 语句反推用到的列 |
-| 7 | `detectUrlType()` / `detectUrlKind()` / `crawlAuthorIndex()` / `crawlArticle()` 的完整返回联合类型（`CrawlError` 的 `reason` 枚举等） | 定义在 `lib/crawler/`，本次未展开 |
-| 8 | `MiMo` / `searchWebFacts` 的内部优先级细节（Google CSE 与 DuckDuckGo 的失败降级顺序） | 本次只确认了 `search_engine` 的可能取值与 gather 的三级调用顺序 |
-| 9 | `PLATFORMS` 中 `custom` 卡的 `word_range_min/max` / `pacing` / `tone_tag` / `ui_hint` 具体值 | 未逐字段抄录；`/api/sites/picker` 会原样透出 |
-| 10 | 是否存在**其它非 `route.ts` 的 API 入口**（如 `middleware.ts`、Route Handler 之外的 server action） | 本次只按 `find app/api -name route.ts` 枚举 |
+- `stripJsonFence` 在 `lib/sse.ts` 有导出实现，但 `fingerprint`(v1)、`fingerprint/v2`、`fingerprint/v3`、`authors/[id]/optimize`、`topics/recommend`、`topics/trending` 各自保留了一份本地副本。v3 的副本多了「fence 结果先 `JSON.parse` 验证，失败再回退大括号截取」的增强逻辑；改清洗逻辑时这几处要同步。
+- `pickAvatarChar` 已抽到 `lib/authors/avatar.ts`（v3 与 `authors/[id]` PATCH 在用），但 `fingerprint`(v1) 与 `fingerprint/v2` 仍各自内联一份相同实现。
+- `articles.refine_versions_json` 存在 dict 与 array 两种形态（`compose/draft` 的新建分支写 dict，复用分支写 array），读取必须经 `parseRefineVersions()` 归一，不要在调用方手写 `JSON.parse` + `Array.isArray`。
+- `fingerprint/v3` 的样本去重口径：URL 模式用 `hashUrl(url)`，粘贴模式用 `sha1(正文前 200 字)`。同一篇正文改动开头 200 字会被当成新样本，反复粘贴相近正文会累积重复样本。
 
-### 11.4 已确认无问题的关键点（防止误改）
+### 附.4 版本标记的使用
 
-- ✅ 32 个 route **全部**声明 `runtime = 'nodejs'` 与 `dynamic = 'force-dynamic'`。
-- ✅ `maxDuration = 300` **仅**存在于 `app/api/tag-assets/route.ts`。
-- ✅ `PATCH /api/fingerprint/v3/[id]` **不是**流式（返回普通 JSON），与「用户详情页等结果」的注释一致。
-- ✅ `compose/draft` 的 `platforms` 串行、主平台强制第一位、单平台失败不阻断后续、`use_critic` 默认 `true`，均与源码一致。
-- ✅ `DELETE /api/fingerprint/v3/[id]` 会先解绑 `crawled_articles.author_id` 再删孤儿 author（保护热点聚合语料）。
-- ✅ `articles/[id]/diff` 的 `from`/`to` 白名单校验、同平台拦截、`article_diffs` 按 hash 缓存与失效，均与源码一致。
+- 判别 v1 / v2 / v3 涉及两个列，语义不同：`version_schema === 'v3'` 用于判断「是不是 v3」；数字列 `version` 用于排序与「取最新一版」。
+- `fingerprint`(v1) 与 `fingerprint/v2` 的 INSERT 列清单里都**不写 `version_schema`**，所以 v2 指纹落库后是 `version=2` 而 `version_schema='v1'`。**只用 `version_schema` 无法区分 v1 与 v2**，必须看 `version`。
+- `/api/authors/[id]/optimize` 走的是 v1 通道：新指纹行 `model_version = 'claude-code-cli'`、不写 `version_schema`、`version = oldVersion + 1`。v3 指纹会被 409 拦下；v2 指纹经这条通道后，新行只呈现 v1 风格。
+
+### 附.5 落库与事务
+
+- `/api/compose/gather` 只导出 `POST`，没有 GET；缓存查询在 POST 内部按 `idea_hash` 完成，命中时以 `cached` + `done` 事件返回。
+- `/api/images/auto` 只导出 `POST`。
+- `/api/compose/draft` 的 `platforms` 串行执行、主平台强制排到第一位、单平台失败不阻断后续平台、`use_critic` 默认 `true`。
+- `sites/[id]` 的 DELETE（先 `site_articles` 再 `sites`）与 `articles/[id]` 的 DELETE（先删主体再清关联表）都**不是事务**，中途出错会留下中间状态。
+- `GET /api/articles/[id]` 的 SELECT 列表包含 `content_html`，但响应体不返回该字段；需要 HTML 预览时要另行补上。
+- `fingerprint/v3` 的 POST 在路由内自行实现了 Stage 0/1/2/3 + 类别配方，而 `lib/fingerprints/v3-engine.ts` 有同一套逻辑供 PATCH 使用。两处必须同步修改，否则会漂移。
+
+### 附.6 实现边界（本文档只覆盖路由层契约）
+
+以下细节由各自模块定义，本文只记录路由层传入 / 传出的值：
+
+| 项 | 定义位置 |
+|---|---|
+| `streamClaude()` 各选项（`timeoutMs`、`model`、`signal`、`onChunk`）的语义与默认值、`ARTICLE_MODEL` 的实际值 | `lib/claude.ts` |
+| `AuthorCandidate` 的完整字段 | `lib/search/` |
+| `runProfileExtraction()` 产出的 `profile_json` 字段集 | `lib/sites/profile-engine.ts` |
+| `fingerprint_json`（v1 / v2 / v3）的完整字段集 | `lib/prompts/fingerprint*.ts`、`lib/composition.ts` |
+| `detectUrlType()` / `detectUrlKind()` / `crawlAuthorIndex()` / `crawlArticle()` 的返回联合类型 | `lib/crawler/` |
+| `searchWebFacts` 与 MiMo web_search 的内部降级顺序 | `lib/search/` |
+| `PLATFORMS` 中 `custom` 卡的 `word_range_min/max` / `pacing` / `tone_tag` / `ui_hint` | `lib/platforms.ts` |
+| 表 / 列的完整 DDL 与 JSON 列形状 | 见 DATA-MODEL |
+| 硬编码的 `model: 'sonnet'` 是否为 CLI 合法标识 | `lib/claude.ts` |
+
+### 附.7 修改代码时容易改坏的点
+
+- `DELETE /api/fingerprint/v3/[id]`：必须先 `UPDATE crawled_articles SET author_id = NULL` 再删孤儿 author，否则 `ON DELETE CASCADE` 会把语料删光。
+- `/api/compose/gather` 命中缓存时只发 `cached` + `done`，不要期待 `started` / `progress`。
+- `/api/articles/[id]/diff` 的 `from` / `to` 白名单校验、同平台拦截、`article_diffs` 按 `from_hash` / `to_hash` 缓存与失效都要保持。
+- `compose/draft` 的 critic 是 fail-open：critic 自身失败只发 `critic_error`，该稿按「未评估」落库并跳出循环。
+- `compose/draft` 落库失败时只发 `error`（`phase: 'db'`）就 return，**不再发 `done`**。
+- 心跳、终局 `error` 兜底与 `finally` 关流只属于 `lib/sse.ts` 的 helper；新增流式路由时优先复用它，或自行补齐这三件事。

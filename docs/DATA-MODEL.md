@@ -1,10 +1,10 @@
-# 笔迹 ByTrace · 数据模型（DATA-MODEL）
+# 笔迹 ByTrace · 数据模型
 
-> 本文档描述 **笔迹 ByTrace**（原 AutoArticle，仓库路径仍为 `autoarticle/`）运行时 SQLite 数据库的完整结构。
->
-> **权威来源与生成方式**：本文逐行阅读了 `lib/`、`app/api/` 下的 schema 与查询代码后写成，**没有连接、没有查询、没有修改任何 `.db` 文件**，也没有执行任何迁移。所有表、列、索引、约束都以源码为唯一依据，并标注 `file:line`。
->
-> 文中出现的一切路径、函数名、表名、列名都是**真实符号，未做重命名**；只有面向人的产品叙述使用「笔迹 ByTrace」。
+> 版本：v1.0 · 更新：2026-06-30
+> 对应代码：笔迹 ByTrace 写作引擎
+> 仓库目录：`autoarticle/`
+
+本文描述 **笔迹 ByTrace** 运行时 SQLite 数据库的结构：表、列、索引、外键约束与 JSON 列形状。
 
 ---
 
@@ -12,12 +12,12 @@
 
 ### 0.1 schema 分散在两个地方
 
-这个项目**没有**单一 schema 文件。建表/扩列逻辑分布在 15 个文件里，共两类：
+这个项目**没有**单一 schema 文件，建表 / 扩列逻辑分布在若干文件里，共两类：
 
 | 类型 | 机制 | 文件 |
 |---|---|---|
 | `.sql` 文件 | `getDb()` 启动时 `db.exec()`，靠 `CREATE TABLE IF NOT EXISTS` / `INSERT OR IGNORE` 幂等 | `lib/schema.sql`、`lib/schema-additions.sql`、`lib/schema-additions-images.sql`、`lib/schema-additions-sites.sql`、`lib/schema-additions-strategies.sql`、`lib/schema-additions-settings.sql`、`lib/schema-additions-v3.sql` |
-| `ensureXxx()` TS 函数 | 用 `PRAGMA table_info` 探测后 `ALTER TABLE` / `CREATE TABLE IF NOT EXISTS`，幂等 | `lib/db.ts`（14 个函数）、`lib/schema-additions-critic.ts`、`lib/schema-additions-gather.ts`、`lib/schema-additions-knowledge-base.ts`、`lib/schema-additions-research.ts` |
+| `ensureXxx()` TS 函数 | 用 `PRAGMA table_info` 探测后 `ALTER TABLE` / `CREATE TABLE IF NOT EXISTS`，幂等 | `lib/db.ts`、`lib/schema-additions-critic.ts`、`lib/schema-additions-gather.ts`、`lib/schema-additions-knowledge-base.ts`、`lib/schema-additions-research.ts` |
 
 **启动装载顺序**在 `lib/db.ts:397-500` 的 `getDb()` 里，一次写死、顺序固定：
 
@@ -80,8 +80,8 @@ resolveDbPath()                    db.ts:17-20
 | 17 | `gather_runs` | `lib/schema-additions-gather.ts:21-32` | `ensureXxx()` | 按 `idea_hash` 的事实底座缓存 |
 | 18 | `knowledge_base` | `lib/schema-additions-knowledge-base.ts:9-27` | `ensureXxx()` | 搜索素材资料库（**只写不读**） |
 | 19 | `knowledge_base_tags` | `lib/schema-additions-knowledge-base.ts:30-37` | `ensureXxx()` | 资料标签（**只写不读**） |
-| 20 | `research_reports` | `lib/schema-additions-research.ts:10-21` | `ensureXxx()` | 深度调研报告（**当前无代码读写**） |
-| 21 | `research_runs` | `lib/schema-additions-research.ts:24-44` | `ensureXxx()` | 调研每轮明细（**当前无代码读写**） |
+| 20 | `research_reports` | `lib/schema-additions-research.ts:10-21` | `ensureXxx()` | 预留：报告主体（**当前未使用**） |
+| 21 | `research_runs` | `lib/schema-additions-research.ts:24-44` | `ensureXxx()` | 预留：每轮明细（**当前未使用**） |
 
 ---
 
@@ -110,7 +110,7 @@ resolveDbPath()                    db.ts:17-20
 - 读：`lib/fingerprint-queries.ts:35-57`（JOIN `fingerprints`）、`app/authors/[id]/page.tsx:102`、`app/fingerprints/[id]/page.tsx:171-179`。
 - 删：`app/api/fingerprint/v3/[id]/route.ts:553-556`（先 `UPDATE crawled_articles SET author_id=NULL` 再删孤儿 author）。
 
-**陷阱**：`authors` 表**没有** `source` / 来源列，尽管旧文档提到过。以源码为准：只有 6 列。
+**注意**：`authors` 只有 6 列，没有 `source` / 来源列；需要追溯样本来源时用 `crawled_articles` 与 `fingerprints` 的关联。
 
 ---
 
@@ -160,7 +160,7 @@ resolveDbPath()                    db.ts:17-20
 **陷阱（重要）**：判别 v1/v2/v3 有**两个**列，语义不完全一致：
 - UI 判 v3 用的是 `version_schema === 'v3'`（`app/fingerprints/[id]/page.tsx:222`）。
 - 排序 / 取"最新一版"用的是数字 `version`（`lib/fingerprint-queries.ts:172-181`）。
-- **v2 路由不写 `version_schema`**，所以 v2 行落库后 `version=2` 但 `version_schema='v1'`（列默认值，`db.ts:94`）。只靠 `version_schema` 无法区分 v2 与 v1，必须看 `version`。详见 §8。
+- **v2 路由不写 `version_schema`**，所以 v2 行落库后 `version=2` 但 `version_schema='v1'`（列默认值，`db.ts:94`）。只靠 `version_schema` 无法区分 v2 与 v1，必须看 `version`（见附录 · 附.2）。
 
 ---
 
@@ -279,7 +279,7 @@ resolveDbPath()                    db.ts:17-20
 **外键**：`article_id → articles(id) ON DELETE CASCADE`。
 **索引**：`idx_article_images_article ON article_images(article_id)`（`lib/schema-additions-images.sql:35`）。
 
-**读写点**：**全仓库搜不到任何 `SELECT` / `INSERT` / `UPDATE` / `DELETE` 触及此表**（除建表语句本身与两份旧文档的表格）。`app/api/images/auto/route.ts` 只把候选图返回给前端（`POST` 响应体 `SlotResult[]`），**不落库**。详见 §8。
+**读写点**：无。除建表语句本身外，当前没有任何 `SELECT` / `INSERT` / `UPDATE` / `DELETE` 触及此表。`app/api/images/auto/route.ts` 只把候选图返回给前端（`POST` 响应体 `SlotResult[]`），**不落库**。该表属预留结构（见附录 · 附.1）。
 
 ---
 
@@ -336,7 +336,7 @@ resolveDbPath()                    db.ts:17-20
 **读写点**：
 - 写：`app/api/fingerprint/v2/route.ts:329-332`、`app/api/fingerprint/v3/route.ts:614-618`、`app/api/fingerprint/v3/[id]/route.ts:342-346`。
 - 删：`app/api/fingerprint/v3/[id]/route.ts:340`（重提炼前清空）、`:542`（删指纹时）。
-- 读：**没有任何 `SELECT ... FROM strategies`**。当前所有碎片检索走的是 `strategy_fragments_indexed`（`app/api/strategies/search/route.ts:79`）。详见 §8。
+- 读：**没有任何 `SELECT ... FROM strategies`**。当前所有碎片检索走的是 `strategy_fragments_indexed`（`app/api/strategies/search/route.ts:79`）。该表属只写不读的预留结构（见附录 · 附.1）。
 
 ---
 
@@ -357,7 +357,7 @@ resolveDbPath()                    db.ts:17-20
 
 **读写点**：`getSetting`（`lib/db.ts:520-531`，调用方 `app/layout.tsx:21`）、`setSetting`（`lib/db.ts:536-543`）、`listSettings`（`lib/db.ts:548-556`，`GET /api/settings`）、`PATCH /api/settings`（`app/api/settings/route.ts:34-72`）。
 
-**陷阱**：旧文档称 `apify_token` 也存这张表，但**当前代码里白名单只有 `default_theme`，且全仓库搜不到 `apify_token` 字样**。见 §8。
+**注意**：写入只走 `PATCH /api/settings` 的白名单（当前仅 `default_theme`），表里不会出现白名单之外的 key。
 
 ---
 
@@ -560,7 +560,7 @@ resolveDbPath()                    db.ts:17-20
 **主键**：`idea_hash`。**外键**：无。
 **索引**：`idx_gather_runs_created ON gather_runs(created_at DESC)`（`db.ts:32`）。
 
-**读写点**：读缓存 `app/api/compose/gather/route.ts:89`；写 `:167-169`。命中即秒返，不重烧 codex 配额（见 `lib/schema-additions-gather.ts:6-14`）。
+**读写点**：读缓存 `app/api/compose/gather/route.ts:89`；写 `:167-169`。命中即秒返，不再触发一次联网搜集（见 `lib/schema-additions-gather.ts:6-14`）。
 
 ---
 
@@ -594,11 +594,11 @@ resolveDbPath()                    db.ts:17-20
 
 主键复合 `(knowledge_id, tag)`；索引 `idx_kb_tags_tag(tag)`（`:37`）。
 
-**读写点**：写 `app/api/compose/gather/route.ts:211-232`。**没有任何 `SELECT ... FROM knowledge_base`**。详见 §8。
+**读写点**：写 `app/api/compose/gather/route.ts:211-232`。**没有任何 `SELECT ... FROM knowledge_base`**，属只写不读的预留结构（见附录 · 附.1）。
 
 ---
 
-### 2.19 `research_reports` / `research_runs` — 深度调研（**当前无代码读写**）
+### 2.19 `research_reports` / `research_runs` — 预建表（**当前无代码读写**）
 
 **创建者**：`lib/schema-additions-research.ts:8-45` 的 `ensureResearchTables()`。
 
@@ -621,18 +621,18 @@ resolveDbPath()                    db.ts:17-20
 |---|---|---|---|---|
 | `report_id` | TEXT | 否（NOT NULL，PK 之一） | — | → `research_reports.id`（未声明 FK） |
 | `attempt` | INTEGER | 否（NOT NULL，PK 之一） | — | 轮次 |
-| `draft_md` | TEXT | 是 | — | 本轮草稿 |
+| `draft_md` | TEXT | 是 | — | 该轮草稿 |
 | `review_json` | TEXT | 是 | — | 审查结果 JSON（issues / score / verdict） |
 | `verdict` | TEXT | 是 | — | `pass` / `revise` |
 | `issue_count` | INTEGER | 否（NOT NULL） | `0` | 问题数 |
 | `high_count` | INTEGER | 否（NOT NULL） | `0` | 高危问题数 |
-| `elapsed_ms` | INTEGER | 是 | — | 本轮耗时 |
+| `elapsed_ms` | INTEGER | 是 | — | 该轮耗时 |
 | `created_at` | INTEGER | 否（NOT NULL） | — | epoch ms |
 | `total_score` | INTEGER | 是 | — | 0-100 总分，best-of-N 选稿用；`ensureResearchTables` 幂等 ALTER 追加（`:41-44`） |
 
 主键复合 `(report_id, attempt)`；索引 `idx_research_runs_report(report_id)`（`:38`）。
 
-**读写点**：**全仓库（`app/` + `lib/`）搜不到任何对该两表的 `SELECT` / `INSERT` / `UPDATE` / `DELETE`**，只有建表代码本身。仓库里也**没有** `app/research/` 目录或 `app/api/research/` 路由。详见 §8。
+**读写点**：无。当前只有建表代码本身，没有任何查询或写入，两表属预留结构（见附录 · 附.1）。
 
 ---
 
@@ -690,9 +690,9 @@ resolveDbPath()                    db.ts:17-20
 | `analogy_bank` | string[] | 同上（`lib/prompts/article.ts:206`、`lib/prompts/outline.ts:208`、`lib/prompts/critic.ts:205`） |
 | `user_facing_summary` | string | `lib/composition.ts:68` |
 
-**重要位置提醒**（旧文档已订正多次，此处再确认）：`structure_repertoire` / `depth_pattern` / `analogy_bank` 写在 `fingerprint_json` **顶层**，不在 `platform_fingerprints[平台]` 下。三个读点（`lib/prompts/article.ts:198-208`、`lib/prompts/outline.ts:200-210`、`lib/prompts/critic.ts:199-206`）都直接读顶层。
+**位置提醒**：`structure_repertoire` / `depth_pattern` / `analogy_bank` 写在 `fingerprint_json` **顶层**，不在 `platform_fingerprints[平台]` 下。三个读点（`lib/prompts/article.ts:198-208`、`lib/prompts/outline.ts:200-210`、`lib/prompts/critic.ts:199-206`）都直接读顶层。
 
-**冗余副本**：v3 写入时把 `platform_fingerprints` / `domain_variations` / `cross_platform_report` / `strategy_fragments` 四个 key **再单独序列化一份**到 4 个独立列（`app/api/fingerprint/v3/route.ts:673-687`）。stage3 的跨平台报告会覆盖 `fingerprint.cross_platform_report`（`lib/fingerprints/v3-engine.ts:465`），而 `cross_platform_report_json` 列存的是 stage3 之后的值。**当前代码读这 4 列的地方极少**——主要读 `fingerprint_json` 本体。见 §8。
+**冗余副本**：v3 写入时把 `platform_fingerprints` / `domain_variations` / `cross_platform_report` / `strategy_fragments` 四个 key **再单独序列化一份**到 4 个独立列（`app/api/fingerprint/v3/route.ts:673-687`）。stage3 的跨平台报告会覆盖 `fingerprint.cross_platform_report`（`lib/fingerprints/v3-engine.ts:465`），而 `cross_platform_report_json` 列存的是 stage3 之后的值。**当前代码读这 4 列的地方极少**——主要读 `fingerprint_json` 本体。两处是同一份数据的副本，写入时必须一起更新（见附录 · 附.3）。
 
 ### 3.3 `articles.composition_json` — 风格组合
 
@@ -736,7 +736,7 @@ resolveDbPath()                    db.ts:17-20
 
 ### 3.5 `articles.refine_versions_json` — 双格式列（**必须走统一解析**）
 
-这是全库最容易踩坑的列。历史上有两种形态并存：
+这是全库最容易踩坑的列，存在两种形态：
 
 **形态 A · dict**（draft route 一次出 N 版时写）：
 
@@ -791,7 +791,7 @@ resolveDbPath()                    db.ts:17-20
 
 **读取点**：`app/sites/page.tsx:55`、`app/sites/[id]/page.tsx:78`、`app/api/compose/draft/route.ts:271-274`、`app/api/compose/outline/route.ts:99`，以及 prompt 组装 `lib/prompts/article.ts:230-246`、`lib/prompts/outline.ts:247-254`。
 
-**注意**：`lib/schema-additions-sites.sql:11-15` 的注释里的 key 列表是**旧版**（没有 v3.3 的三个字段）。以 `lib/prompts/siteprofile.ts` 为准。
+**注意**：`lib/schema-additions-sites.sql:11-15` 的注释里列出的 key 不含 v3.3 新增的三个字段；字段全集以 `lib/prompts/siteprofile.ts` 的 schema 为准。
 
 ### 3.7 `fingerprint_category_profiles.profile_json` — 类别专属指纹
 
@@ -839,7 +839,7 @@ category_specific_fragments: [{ tag, title, description, example, when_to_use, w
 
 ### 3.14 `research_runs.review_json`
 
-codex 审查输出 JSON（issues / score / verdict）；`total_score` 由审查结果单独落列（`lib/schema-additions-research.ts:40-44` 的注释）。**当前无代码写入**（见 §8）。
+审查输出 JSON（issues / score / verdict）；`total_score` 由审查结果单独落列（`lib/schema-additions-research.ts:40-44` 的注释）。**当前无代码写入**（见附录 · 附.1）。
 
 ---
 
@@ -977,7 +977,7 @@ erDiagram
 
 ③ 事实底座（与 ④ 并行，idea 确认即后台起跑）
    POST /api/compose/gather
-     → 命中 gather_runs.idea_hash ？秒返：否则 codex 联网搜集
+     → 命中 gather_runs.idea_hash ？秒返：否则联网搜集
      → INSERT gather_runs（material_md 素材包）
      → INSERT knowledge_base + knowledge_base_tags
 
@@ -991,7 +991,7 @@ erDiagram
 ⑤ 正文（多平台串行）
    POST /api/compose/draft
      → ensureComposeColumns()
-     → per-platform: streamClaude（Sonnet 4.6，240s）→ critic 循环（≤2 次重写）
+     → per-platform: streamClaude（正文档位，timeout 480s）→ critic 循环（≤2 次重写）
      → INSERT articles（content_md=主平台正文，content_html，composition_json，outline_json，idea，
                         refine_versions_json=其它平台 dict）
      → UPDATE fingerprints.hit_count + 1 / UPDATE authors.last_used_at
@@ -1001,7 +1001,7 @@ erDiagram
    POST /api/images/auto
      → SELECT fingerprints.fingerprint_json 取 visual.image_style
      → 本地 local_assets 检索 + Unsplash 补
-     → 结果直接返前端；**不写 article_images**（见 §8）
+     → 结果直接返前端；**不写 article_images**（见附录 · 附.1）
 
 ⑦ 跨平台差异
    POST /api/articles/[id]/diff
@@ -1036,7 +1036,7 @@ erDiagram
 |---|---|---|---|
 | `gather_runs` | `idea_hash` = `sha256(trim(idea)+'\n'+sourceHint).slice(0,16)` | 改 idea 自然换 hash；无 TTL，靠 `created_at` 在 UI 提示时效 | `app/api/compose/gather/route.ts:89,167` |
 | `article_diffs` | `(article_id, from_platform, to_platform)` + `from_hash` / `to_hash` | 任一平台正文变了 → hash 不匹配 → 重算覆盖 | `app/api/articles/[id]/diff/route.ts:126-133,166-173` |
-| `crawled_articles` | `url_hash` UNIQUE | 永久去重；URL 归一化需先剥 `#rd`（旧文档记载的坑） | `lib/schema-additions.sql:7` |
+| `crawled_articles` | `url_hash` UNIQUE | 永久去重；URL 归一化需先剥 `#rd` | `lib/schema-additions.sql:7` |
 | `fingerprint_articles` | `(fingerprint_id, url_hash)` | 同一指纹内同篇不重复 | `lib/db.ts:180` |
 | `site_articles` | `(site_id, url_hash)` | 同一站点内同篇不重复 | `lib/db.ts:341` |
 | `local_assets` | `file_path` UNIQUE | 重扫跳过已有 | `lib/schema-additions-images.sql:6` |
@@ -1063,7 +1063,7 @@ erDiagram
 
 > **新增列必须走 `lib/db.ts` 里幂等的 `ensureXxx()`，绝不能改顶层 `lib/schema.sql`。**
 
-这条规则在项目文档里反复出现（`CLAUDE.md` / `AGENTS.md` 的「关键模块」与「给下次的你」两节），根因写在源码注释里：
+这条规则的根因写在源码注释里：
 
 - `lib/schema-additions-compose.sql:4-6`：
   > SQLite 不支持 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`，所以这些语句必须由代码先用 `PRAGMA table_info(articles)` 看一下再决定要不要 exec。
@@ -1172,7 +1172,7 @@ function resolveDbPath(): string {
 <repo>/data/autoarticle.db-shm    共享内存索引
 ```
 
-> 本机实测（2026-09 目录列表）：`data/autoarticle.db`（≈4.5 MB）、`data/autoarticle.db-wal`（≈2.2 MB）、`data/autoarticle.db-shm`（32 KB）三者同时存在，符合 WAL 模式预期。`data/.gitkeep` 与 `data/assets/`、`data/xiaopu-article-kb/`、`data/xiaopu-skill/` 也在此目录下，但不是 SQLite 的一部分。
+> 首次启动后这三个文件会同时存在，符合 WAL 模式预期。`data/` 下还有 `.gitkeep`、`assets/`、`xiaopu-article-kb/`、`xiaopu-skill/`，它们不属于 SQLite。
 
 ### 7.2 WAL 模式与 `foreign_keys`
 
@@ -1193,7 +1193,6 @@ db.pragma('foreign_keys = ON');
 - `data/autoarticle.db-wal` 里装着**尚未 checkpoint 到主库**的已提交事务。手删 `-wal` = 直接丢数据，且可能让主库处于不一致状态。
 - 同理 `-shm` 也不要单独删。
 - 要重置数据库，必须**整个 `data/` 目录一起处理**（并确保没有 dev / next-server 进程仍持有连接，`fuser data/autoarticle.db` 可查锁）。
-- 项目文档（`CLAUDE.md` / `AGENTS.md`「已知非阻塞问题」）已把这条列为固定警告。
 
 ### 7.4 运行时约束
 
@@ -1202,88 +1201,36 @@ db.pragma('foreign_keys = ON');
 
 ---
 
-## 8. 待核实 / 不一致
+## 附：设计约定与已知约束
 
-以下都是**读源码后确认存在**的矛盾或无法验证项。没有猜测结论，只列证据。
+### 附.1 预留但当前未使用的表
 
-### 8.1 `article_images` 是死表（建了但无人用）
+以下表会由 `getDb()` 正常建出来，但当前没有任何读写路径。它们属于预留结构，理解数据模型时可以跳过；也**不要**据「没有代码引用」就删表——真实库里它们是已存在的（空）表。
 
-- 建表：`lib/schema-additions-images.sql:23-33`；索引 `:35`。
-- 全仓库 `grep`：除建表语句本身和两份 Markdown 文档的表格外，**没有任何 `SELECT` / `INSERT` / `UPDATE` / `DELETE` 触及 `article_images`**。
-- 自动配图接口 `app/api/images/auto/route.ts` 只做「取指纹风格 → 模型出 slot → 本地/Unsplash 找候选 → 返回 JSON」，全程**不落库**；其 `SlotResult`（`app/api/images/auto/route.ts:34-41`）只是响应体。
-- **影响**：`articles → article_images` 这条 ER 关系在当前代码里**没有实际数据流**。若未来要做"文章配图持久化"，需要补写侧。
-- 同理 `local_assets.id → article_images.asset_id` 也从未被写入过。
+| 表 | 建表位置 | 状态 |
+|---|---|---|
+| `article_images` | `lib/schema-additions-images.sql:23-33` | 无读写。自动配图接口只把候选图返回前端，`local_assets.id → article_images.asset_id` 也从未写入。若将来要做「文章配图持久化」，需要补写侧 |
+| `knowledge_base` / `knowledge_base_tags` | `lib/schema-additions-knowledge-base.ts:9-37` | 只写不读。写入见 `app/api/compose/gather/route.ts:211-232`；没有查询 / 复用这些资料的 API 或页面 |
+| `strategies` | `lib/schema-additions-strategies.sql:4-13` | 只写不读。面向用户的碎片检索全部走 `strategy_fragments_indexed`（`app/api/strategies/search/route.ts:79`）；`fingerprint_json` 里 v2 的 `strategies` 数组另被 `lib/fingerprint-queries.ts:271` 用于计数，但那是 JSON 副本，不是这张表 |
+| `research_reports` / `research_runs` | `lib/schema-additions-research.ts:8-45` | 只建表，无读写；`review_json` 的实际 key 结构没有写入侧可参照 |
 
-### 8.2 `research_reports` / `research_runs` 建表但无读写
+相关约定：
 
-- 建表与补列：`lib/schema-additions-research.ts:8-45`，由 `lib/db.ts:487` 调用。
-- 全仓库 `grep`：只有 schema 文件命中，**没有任何查询/写入**。
-- 仓库里**不存在** `app/research/` 页面目录，也**不存在** `app/api/research/` 路由目录（`ls app` 与 `ls app/api` 已确认）。
-- 两份旧文档（`CLAUDE.md` / `AGENTS.md`）都描述了 `/research` 深度调研链路与 `lib/research.ts`、`app/api/research/route.ts`、`app/research/page.tsx`，但**这些文件在当前 checkout 中已不存在**。`lib/` 下也没有 `research.ts`。
-- **结论**：这两张表是"预建但当前无代码使用"。无法从源码验证 `review_json` 的实际 key 结构。
+- `app/api/compose/gather/route.ts:204` 会再调一次 `ensureKnowledgeBaseTable(db)`，而 `getDb()` 里已经调过（`lib/db.ts:493`）。重复调用幂等，不影响结果。
+- `crawled_articles.publish_time` 声明了两次：`lib/schema-additions.sql:15` 的 `CREATE TABLE` 里已有，`lib/db.ts:380-382` 的 `ensureCrawledArticlesMediumColumn` 又 PRAGMA 探测后 `ALTER TABLE` 补一次。老库由 ALTER 补、新库由 CREATE 带，结果正确，只是冗余；该函数名只提 `Medium`，却顺带补了 `publish_time`。
+- `lib/schema-additions-v3.sql` 本体只有注释 + 一句 `SELECT 1;`（`lib/schema-additions-v3.sql:14-15`），被 `getDb()` 当 v3 占位执行（`lib/db.ts:446-451`）。真正的 v3 列扩展在 `lib/db.ts` 的 `ensureFingerprintV3Columns` / `ensureStrategyV3Columns`，**不要**把它当作 v3 表结构的来源。
 
-### 8.3 `knowledge_base` / `knowledge_base_tags` 只写不读
+### 附.2 版本列的两个判别口径
 
-- 写入：`app/api/compose/gather/route.ts:211-232`（`saveToKnowledgeBase`）。
-- 读取：**全仓库搜不到 `FROM knowledge_base`**。没有提供查询/复用这些资料的 API 或页面。
-- 另外该文件的建表函数在 `getDb()` 里已被调用（`lib/db.ts:493`），而 `app/api/compose/gather/route.ts` 里又调了一次 `ensureKnowledgeBaseTable(db)`（`:204`），属重复但幂等。
+- `version_schema` 默认值 `'v1'`（`lib/db.ts:94`）；v3 路由显式写 `'v3'`（`app/api/fingerprint/v3/route.ts:609`、`app/api/fingerprint/v3/[id]/route.ts:325`）。
+- `fingerprint/v2` 与 `fingerprint`(v1) 的 INSERT 列清单里都没有 `version_schema`，所以 v2 指纹是 `version=2` + `version_schema='v1'`。
+- 用法约定：`version_schema === 'v3'` → 判断是否 v3（`app/fingerprints/[id]/page.tsx:222`）；数字列 `version` → 具体版本号与排序（`lib/fingerprint-queries.ts:172-181`）。**不要用 `version_schema` 区分 v1 与 v2。**
+- 两个列由不同函数引入（`ensureFingerprintVersionColumns` 引入 `version`，`ensureFingerprintV3Columns` 引入 `version_schema`），没有任何代码强制二者一致，可以写出 `version=2` + `version_schema='v3'` 这类组合。
 
-### 8.4 `strategies` 只写不读
+### 附.3 JSON 形状的版本差异
 
-- 写：`app/api/fingerprint/v2/route.ts:329`、`app/api/fingerprint/v3/route.ts:614`、`app/api/fingerprint/v3/[id]/route.ts:342`。
-- 删：`app/api/fingerprint/v3/[id]/route.ts:340,542`。
-- 读：**没有 `SELECT ... FROM strategies`**。所有面向用户的碎片检索都走 `strategy_fragments_indexed`（`app/api/strategies/search/route.ts:79`）。
-- `fingerprint_json` 内部的 v2 `strategies` 数组仍被 `lib/fingerprint-queries.ts:271` 用于计数，但那是 JSON 里的副本，不是这张表。
-
-### 8.5 v2 指纹的 `version_schema` 落成 `'v1'`
-
-- `version_schema` 默认值 `'v1'`（`lib/db.ts:94`）。
-- v3 路由显式写 `'v3'`（`app/api/fingerprint/v3/route.ts:609`、`app/api/fingerprint/v3/[id]/route.ts:325`）。
-- **v2 路由的 INSERT 列清单里没有 `version_schema`**（`app/api/fingerprint/v2/route.ts:319-322`），v1 路由同样没有（`app/api/fingerprint/route.ts:184-186`）。
-- 后果：v2 指纹行为 `version=2`、`version_schema='v1'`。UI 判 v3 用 `version_schema === 'v3'`（`app/fingerprints/[id]/page.tsx:222`）没问题；但**若要用 `version_schema` 区分 v1 与 v2 会失败**，必须改用数字列 `version`。
-- **两个判别列的权威用法**：`version_schema` → 是否 v3；`version` → 具体版本号与排序（`lib/fingerprint-queries.ts:172-181`）。
-
-### 8.6 v1 的 `source_articles_json` 形状与前两版不同，且缺 `url`
-
-- v1 写的是 `{ title?, content }[]`（`app/api/fingerprint/route.ts:82-95,201`）。
-- v2 写 `{ title, category, source, url, chars }[]`（`app/api/fingerprint/v2/route.ts:334-340`）。
-- v3 写 `{ title, platform, domain, medium, url, chars }[]`（`app/api/fingerprint/v3/route.ts:638-645`）。
-- `lib/fingerprint-queries.ts:66-72` 只从项里取 `.url`；v1 项无 `url` → 该项被过滤，`displayPlatform()` 的 woshipm 域名嗅探（`:219-220`）对 v1 永远不生效，只能回退 `authors.platform`。
-- 这是**形状漂移**，不是错误；但任何新增消费方读这列时必须按版本容错。
-
-### 8.7 `fingerprints` 的 4 个 v3 冗余 JSON 列读点极少
-
-- 写：`app/api/fingerprint/v3/route.ts:673-687` 明确把这 4 个 key 各序列化一份进独立列。
-- 读：全仓库几乎找不到从这 4 列 SELECT 的代码（查询主要读 `fingerprint_json` 本体，例如 `lib/fingerprint-queries.ts:35,51`、`app/fingerprints/[id]/page.tsx:172`、`lib/composition.ts:316`）。
-- **无法从源码验证**这 4 列是否仍被某个未搜索到的动态查询使用；至少可以确认它们当前是"写多读少"，存在双份数据不一致的风险（尤其 `cross_platform_report_json` 与 `fingerprint_json.cross_platform_report` 在同一事务里写，值应一致，但没有约束保证）。
-
-### 8.8 `settings` 里没有 `apify_token`
-
-- 旧文档称 `settings` 表存 `default_theme` 与 `apify_token`。
-- 实际：`app/api/settings/route.ts:15-19` 的 `ALLOWED_KEYS` **只含 `default_theme`**，`VALUE_VALIDATORS` 只校验 `B/C/D`。
-- 全仓库 `grep apify_token` **零命中**；`lib/crawler/apify.ts` 在当前 checkout 中也**不存在**（`lib/crawler/` 下只有 `adapters/ dedupe.ts html.ts http.ts index.ts opencli.ts pagination.ts test-crawler.ts test-output.json types.ts wechat.ts`）。
-- **结论**：`apify_token` 在当前代码里已无任何读写路径，无法验证其存在性。
-
-### 8.9 `lib/schema-additions-v3.sql` 不含任何建表语句
-
-- 文件本体只有注释 + 一句 `SELECT 1;`（`lib/schema-additions-v3.sql:14-15`）。
-- 它被 `getDb()` 当作"v3 schema 占位"执行（`lib/db.ts:446-451`）。真正的 v3 列扩展全在 `db.ts` 的 `ensureFingerprintV3Columns` / `ensureStrategyV3Columns`。
-- 因此**不能**把 `schema-additions-v3.sql` 当作 v3 表结构的来源。
-
-### 8.10 `ensureFingerprintVersionColumns` 与 `ensureFingerprintV3Columns` 的 `version` 语义重叠
-
-- 数字列 `version` 由 `ensureFingerprintVersionColumns`（`db.ts:61-76`）引入，默认 1。
-- 文本列 `version_schema` 由 `ensureFingerprintV3Columns`（`db.ts:86-108`）引入，默认 `'v1'`。
-- 两者命名相近、都由"版本"驱动，但**没有任何代码强制二者一致**（可写出 `version=2, version_schema='v3'` 这种组合）。见 8.5。
-
-### 8.11 `crawled_articles.publish_time` 声明了两次
-
-- `lib/schema-additions.sql:15` 的 `CREATE TABLE` 里已有 `publish_time TEXT`。
-- `lib/db.ts:380-382` 的 `ensureCrawledArticlesMediumColumn` 又做了一次 PRAGMA 检测后 `ALTER TABLE ... ADD COLUMN publish_time TEXT`。
-- 结果正确（老库由 ALTER 补，新库由 CREATE 带），只是**冗余**；该函数名只提 `Medium`，却顺带补了 `publish_time`，命名与职责不符。
-
-### 8.12 `data/*.db` 的实际结构未在本次核验
-
-- 按要求，本次**没有打开 `.db` 文件**，也没有运行 `sqlite3` / 迁移。
-- 因此本文档描述的是"**代码认为的**结构"（即 `getDb()` 在全新库上会建出的结构）。真实运行库中是否已经因历史原因缺少某些 `ensureXxx` 补出来的列，**无法从源码断言**，需要在允许只读查询时另行核对。
-- 一个可预期的风险点：`article_images`（8.1）、`research_*`（8.2）、`knowledge_base*`（8.3）即使代码不写，表也会被 `getDb()` 建出来，所以它们在真实库里应该是存在的空表。
+- `source_articles_json` 有三种形状：v1 `{ title?, content }[]`、v2 `{ title, category, source, url, chars }[]`、v3 `{ title, platform, domain, medium, url, chars }[]`。
+- v1 项**没有 `url`**。`lib/fingerprint-queries.ts:66-72` 只从项里取 `.url`，所以 v1 项会被过滤，`displayPlatform()` 的 woshipm 域名嗅探（`:219-220`）对 v1 永远不生效，只能回退 `authors.platform`。这是形状差异而非错误；新增消费方读这列时必须按版本容错。
+- `structure_repertoire` / `depth_pattern` / `analogy_bank` 写在 `fingerprint_json` **顶层**，不在 `platform_fingerprints[平台]` 下。三个读点（`lib/prompts/article.ts:198-208`、`lib/prompts/outline.ts:200-210`、`lib/prompts/critic.ts:199-206`）都直接读顶层。
+- `fingerprints` 的 4 个 v3 冗余 JSON 列（`platform_fingerprints_json` / `domain_variations_json` / `cross_platform_report_json` / `strategy_fragments_json`）在同一事务里写（`app/api/fingerprint/v3/route.ts:673-687`），但读点极少——查询主要读 `fingerprint_json` 本体（`lib/fingerprint-queries.ts:35,51`、`app/fingerprints/[id]/page.tsx:172`、`lib/composition.ts:316`）。`cross_platform_report_json` 与 `fingerprint_json.cross_platform_report` 是同一份数据的两个副本，没有约束保证一致，写入时要一起更新。
+- `sites.profile_json` 的字段全集以 `lib/prompts/siteprofile.ts` 的 schema 为准（`lib/schema-additions-sites.sql` 里的注释只记录了早期字段）。

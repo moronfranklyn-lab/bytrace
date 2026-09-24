@@ -35,3 +35,6 @@ npm-debug.log*
 
 # local env backup
 .env.local.backup-*
+
+# internal working notes (not part of the deliverable)
+internal/

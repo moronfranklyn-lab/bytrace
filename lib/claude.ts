@@ -19,15 +19,14 @@ import {
 } from '@/lib/env';
 
 /**
- * 本机 Claude CLI 的兜底搜索路径。
+ * 本机 Claude CLI 的候选搜索路径。
  *
- * 历史问题：这里曾经**硬编码** `/Users/mixingtumima0000/...`，换电脑必挂。
- * 现在改为按「用户无关」的方式推导：
+ * 按「与用户名无关」的方式推导，因此在任何机器上都能定位到 CLI：
  *   1. BYTRACE_CLAUDE_BIN / CLAUDE_BIN 显式指定（最高优先）
  *   2. `claude`（交给 PATH 解析）
  *   3. $HOME 下的常见安装位置（~/.local/bin、~/.npm-global/bin、~/.bun/bin、/opt/homebrew/bin）
  *
- * 注意：路径不存在不会立刻报错——spawn 会抛 ENOENT，届时按候选顺序回退。
+ * 候选路径不存在不会立刻报错——spawn 抛 ENOENT 时会按顺序继续尝试下一个。
  */
 export const CLAUDE_BIN_CANDIDATES: string[] = (() => {
   const explicit = envStr(...CLAUDE_BIN_KEYS);
@@ -575,7 +574,7 @@ function streamCodexCli(
     });
 
     const guardedPrompt = [
-      '你是 AutoArticle 的纯文本写作/分析模型。只完成用户给出的写作、改写、JSON 生成或评分任务。',
+      '你是笔迹 ByTrace 的纯文本写作/分析模型。只完成用户给出的写作、改写、JSON 生成或评分任务。',
       '这是应用内部模型调用，不是直接回复用户；不要称呼 Ethan，不要寒暄，不要输出与任务无关的解释。',
       '不要调用工具，不要读取或修改本机文件，不要执行命令。',
       '如果任务要求 JSON，只输出可被 JSON.parse 解析的 JSON，不要 Markdown 围栏。',

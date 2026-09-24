@@ -276,7 +276,7 @@ export default async function HomePage() {
       </section>
 
       <footer className="footer">
-        AutoArticle · 本地工具 · v0.1 · 数据存在 ./data/autoarticle.db
+        笔迹 ByTrace · 本地工具 · 数据存在 ./data/autoarticle.db
       </footer>
     </>
   );

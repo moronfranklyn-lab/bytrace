@@ -19,7 +19,7 @@ export function ComposeNav({ currentLabel, saveHint = '已自动保存' }: Compo
         <div className="nav-left">
           <Link href="/" className="logo">
             <span className="logo-mark">A</span>
-            AutoArticle
+            笔迹 ByTrace
           </Link>
           <div className="breadcrumb">
             <Link href="/">工作台</Link>

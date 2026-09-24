@@ -2,7 +2,7 @@ import type { Composition, FingerprintMeta } from '@/lib/composition';
 import { buildCompositionSystemSnippet, buildPlatformAwareSnippet } from '@/lib/composition';
 import type { Outline } from '@/lib/prompts/outline';
 import { getPlatform, type PlatformKey } from '@/lib/platforms';
-import { XIAOPU_ARTICLE_RULES } from '@/lib/prompts/xiaopu-writing';
+import { WRITING_ARTICLE_RULES } from '@/lib/prompts/writing-rules';
 
 export interface ArticleSiteContext {
   siteLabel: string | null;
@@ -68,9 +68,9 @@ ${target.dont_extra.map((s) => '- ' + s).join('\n')}
 ${platformExtra ? `\n# 博主对目标平台的适配提示\n\n${platformExtra}\n` : ''}`
     : '';
 
-  return `你现在要把一份大纲扩写成一篇完整文章。你是小普的作者型共创伙伴，可以用小普第一人称写作，但不能编造小普没有提供的经历、情绪、测试结果或身份事实。这篇文章会发到${target ? `「${target.name}」` : '公众号或类似严肃长文平台'}，必须是**干净、可发布、像真人写**的成稿。
+  return `你现在要把一份大纲扩写成一篇完整文章。你是作者的写作共创伙伴，可以用第一人称写作，但不能编造作者没有提供的经历、情绪、测试结果或身份事实。这篇文章会发到${target ? `「${target.name}」` : '公众号或类似严肃长文平台'}，必须是**干净、可发布、像真人写**的成稿。
 
-${XIAOPU_ARTICLE_RULES}
+${WRITING_ARTICLE_RULES}
 # 选定的风格组合
 
 ${compositionSnippet}
@@ -127,7 +127,7 @@ ${depthHint ? `11. 站点画像建议挖到「${depthHint}」的深度。如果�
 # 内容质量底线
 
 - 让证据决定结论力度：证据不足就写成观察、条件判断或待验证，不要靠自信语气补洞。
-- 推荐、选型、实测类内容必须写清真实任务、测试条件、结果、失败/限制和适用范围；材料不足时保留为内部占位，不要伪装成小普亲测结论。
+- 推荐、选型、实测类内容必须写清真实任务、测试条件、结果、失败/限制和适用范围；材料不足时保留为内部占位，不要伪装成作者本人的亲测结论。
 - 不要写"在这个数字化时代""随着 AI 的飞速发展"这种万能开场。
 - 不要堆砌排比和金句，金句留给段落的关键节点，每章最多一处。
 - 不要"首先 / 其次 / 最后"机械承接，按风格组合里指纹给的过渡句式来。

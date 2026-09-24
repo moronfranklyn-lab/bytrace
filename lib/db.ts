@@ -5,18 +5,29 @@ import { ensureCriticRunsTable } from '@/lib/schema-additions-critic';
 import { ensureGatherRunsTable } from '@/lib/schema-additions-gather';
 import { ensureResearchTables } from '@/lib/schema-additions-research';
 import { ensureKnowledgeBaseTable } from '@/lib/schema-additions-knowledge-base';
+import { envStr, DATA_DIR_KEYS } from '@/lib/env';
 
 /**
  * 单例 SQLite 连接。
- * 数据文件：<repo>/data/autoarticle.db
+ *
+ * 数据文件位置：BYTRACE_DATA_DIR/autoarticle.db，未配置则回退 <repo>/data/autoarticle.db。
+ * 这样数据可以脱离仓库目录放到用户主目录的标准位置（便于备份与升级）。
+ * schema 文件始终从仓库读（它们是代码的一部分，不随数据迁移）。
+ *
  * 启动时执行 lib/schema.sql。
  */
 
 let _db: Database.Database | null = null;
 
+/** 数据目录：环境变量优先，否则回退仓库内 data/。 */
+export function resolveDataDir(): string {
+  const override = envStr(...DATA_DIR_KEYS);
+  if (override) return override;
+  return join(process.cwd(), 'data');
+}
+
 function resolveDbPath(): string {
-  // 在 Next.js 运行时 process.cwd() 指向项目根（autoarticle/）
-  return join(process.cwd(), 'data', 'autoarticle.db');
+  return join(resolveDataDir(), 'autoarticle.db');
 }
 
 function resolveSchemaPath(): string {

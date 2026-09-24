@@ -3,10 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/dev.mjs dev",
     "build": "next build",
-    "start": "next start",
-    "lint": "next lint"
+    "start": "node scripts/dev.mjs start",
+    "lint": "next lint",
+    "dev:port": "node scripts/dev.mjs dev"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",

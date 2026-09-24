@@ -9,14 +9,12 @@ export const dynamic = 'force-dynamic';
 /**
  * 默认扫描目录。
  *
- * 历史问题：这里曾**硬编码** `/Users/mixingtumima0000/资料合集/.../2026世界机器人大会`，
- * 换电脑 / 换目录必挂。现在改为按优先顺序解析：
- *   1. BYTRACE_SCAN_DEFAULT_DIR（.env.local 显式指定，推荐）
+ * 按优先顺序解析，不硬编码任何机器路径：
+ *   1. BYTRACE_SCAN_DEFAULT_DIR（在 .env.local 显式指定，推荐）
  *   2. ~/Pictures（macOS 通用图片目录）
  *   3. 当前工作目录
  *
- * 注意：本端点仍接受调用方传入的任意 path（与 /api/assets/scan 的白名单策略不同），
- * 这是既有行为；本轮只去掉硬编码，不收紧访问策略，避免改动前端既有调用。
+ * 注意：本端点接受调用方传入的 path（与 /api/assets/scan 的白名单策略不同）。
  */
 function defaultScanDir(): string {
   const configured = envStr('BYTRACE_SCAN_DEFAULT_DIR');

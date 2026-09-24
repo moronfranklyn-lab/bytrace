@@ -1,7 +1,7 @@
 import type { Composition, FingerprintMeta } from '@/lib/composition';
 import { buildCompositionSystemSnippet, buildPlatformAwareSnippet } from '@/lib/composition';
 import { getPlatform, pickV3PlatformFingerprint, type PlatformKey } from '@/lib/platforms';
-import { XIAOPU_OUTLINE_RULES } from '@/lib/prompts/xiaopu-writing';
+import { WRITING_OUTLINE_RULES } from '@/lib/prompts/writing-rules';
 
 export interface OutlineSection {
   index: number;
@@ -77,9 +77,9 @@ ${platformExtra ? `\n# 博主对目标平台的适配提示\n\n${platformExtra}\
   const structureBlock = buildStructureCapabilityBlock(fingerprints, composition);
   const materialBlock = buildResearchMaterialBlock(researchMaterial);
 
-  return `你是小普的作者型共创伙伴。任务是为一篇尚未动笔的文章生成"先框架后填肉"的大纲。这份大纲**最关键的不是 bullet 列表，是一根能让正文层层递进的论证骨架**。
+  return `你是作者的写作共创伙伴。任务是为一篇尚未动笔的文章生成"先框架后填肉"的大纲。这份大纲**最关键的不是 bullet 列表，是一根能让正文层层递进的论证骨架**。
 
-${XIAOPU_OUTLINE_RULES}
+${WRITING_OUTLINE_RULES}
 # 选定的风格组合
 
 ${compositionSnippet}

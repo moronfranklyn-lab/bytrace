@@ -260,7 +260,7 @@ async function exportXhsLongImage(md: string): Promise<void> {
 
   ctx.fillStyle = '#8b857b';
   ctx.font = '400 24px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
-  ctx.fillText('由 AutoArticle 排版导出', paddingX, height - 72);
+  ctx.fillText('由 笔迹 ByTrace 排版导出', paddingX, height - 72);
 
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png', 0.94));
   if (!blob) throw new Error('图片生成失败');

@@ -5,7 +5,7 @@
  *
  *   npx tsx scripts/scan-local-assets.ts [optional/path]
  *
- * Defaults to /Users/mixingtumima0000/资料合集/项目合集/公众号/公众号配图/
+ * 默认扫描 BYTRACE_ASSETS_ROOT，未配置则用 <repo>/data/assets。
  */
 
 import { scanDirectory, DEFAULT_LOCAL_ASSETS_ROOT } from '../lib/images/scanner';

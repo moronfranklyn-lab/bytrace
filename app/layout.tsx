@@ -6,7 +6,7 @@ import { getSetting } from '@/lib/db';
 import type { ThemeId } from '@/stores/theme-store';
 
 export const metadata: Metadata = {
-  title: 'AutoArticle',
+  title: '笔迹 ByTrace',
   description: '本地写作工具：风格指纹 + 智能仿写',
 };
 

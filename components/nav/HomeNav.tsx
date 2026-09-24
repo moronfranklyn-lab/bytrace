@@ -29,7 +29,7 @@ export function HomeNav({ activePath = '/' }: HomeNavProps) {
       <div className="nav-inner">
         <Link href="/" className="logo">
           <span className="logo-mark">A</span>
-          AutoArticle
+          笔迹 ByTrace
         </Link>
 
         <div className="nav-links nav-links-desktop">

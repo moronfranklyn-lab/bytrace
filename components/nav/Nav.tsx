@@ -31,7 +31,7 @@ export function Nav({ links, leftSlot, rightBefore, rightAfter, wide = false }: 
         <div className="nav-left">
           <Link href="/" className="logo">
             <span className="logo-mark">A</span>
-            AutoArticle
+            笔迹 ByTrace
           </Link>
           {leftSlot}
         </div>

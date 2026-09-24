@@ -16,7 +16,7 @@
 
 import type { Composition, FingerprintMeta } from '@/lib/composition';
 import type { Outline } from '@/lib/prompts/outline';
-import { XIAOPU_CRITIC_RULES } from '@/lib/prompts/xiaopu-writing';
+import { WRITING_CRITIC_RULES } from '@/lib/prompts/writing-rules';
 
 /** Critic 评分维度。和 critic prompt + critic_runs 表列名一一对应。 */
 export type CriticDimension =
@@ -70,7 +70,7 @@ export function buildCriticPrompt(
 
 你**不是**编辑，**不要**改写文章；你只输出评分 JSON。
 
-${XIAOPU_CRITIC_RULES}
+${WRITING_CRITIC_RULES}
 # 博主指纹要求（评分依据，最高优先级）
 
 ${fpBlock}

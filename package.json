@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "node scripts/dev.mjs start",
     "lint": "next lint",
-    "dev:port": "node scripts/dev.mjs dev"
+    "dev:port": "node scripts/dev.mjs dev",
+    "doctor": "node scripts/doctor.mjs"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",

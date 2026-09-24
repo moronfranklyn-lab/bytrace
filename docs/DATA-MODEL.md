@@ -17,7 +17,7 @@
 | 类型 | 机制 | 文件 |
 |---|---|---|
 | `.sql` 文件 | `getDb()` 启动时 `db.exec()`，靠 `CREATE TABLE IF NOT EXISTS` / `INSERT OR IGNORE` 幂等 | `lib/schema.sql`、`lib/schema-additions.sql`、`lib/schema-additions-images.sql`、`lib/schema-additions-sites.sql`、`lib/schema-additions-strategies.sql`、`lib/schema-additions-settings.sql`、`lib/schema-additions-v3.sql` |
-| `ensureXxx()` TS 函数 | 用 `PRAGMA table_info` 探测后 `ALTER TABLE` / `CREATE TABLE IF NOT EXISTS`，幂等 | `lib/db.ts`、`lib/schema-additions-critic.ts`、`lib/schema-additions-gather.ts`、`lib/schema-additions-knowledge-base.ts`、`lib/schema-additions-research.ts` |
+| `ensureXxx()` TS 函数 | 用 `PRAGMA table_info` 探测后 `ALTER TABLE` / `CREATE TABLE IF NOT EXISTS`，幂等 | `lib/db.ts`、`lib/schema-additions-critic.ts`、`lib/schema-additions-gather.ts`、`lib/schema-additions-knowledge-base.ts` |
 
 **启动装载顺序**在 `lib/db.ts:397-500` 的 `getDb()` 里，一次写死、顺序固定：
 
@@ -40,7 +40,6 @@ resolveDbPath()                    db.ts:17-20
   → ensureFingerprintArticlesCategoryColumns / ensureFingerprintCategoryProfilesTable / ensureStrategyFragmentsIndexedTable db.ts:476-478
   → ensureStyleRecipesTable        db.ts:481
   → ensureCriticRunsTable          db.ts:484
-  → ensureResearchTables           db.ts:487
   → ensureGatherRunsTable          db.ts:490
   → ensureKnowledgeBaseTable       db.ts:493
   → ensureLocalAssetsAiTaggedColumn db.ts:496
@@ -80,8 +79,6 @@ resolveDbPath()                    db.ts:17-20
 | 17 | `gather_runs` | `lib/schema-additions-gather.ts:21-32` | `ensureXxx()` | 按 `idea_hash` 的事实底座缓存 |
 | 18 | `knowledge_base` | `lib/schema-additions-knowledge-base.ts:9-27` | `ensureXxx()` | 搜索素材资料库（**只写不读**） |
 | 19 | `knowledge_base_tags` | `lib/schema-additions-knowledge-base.ts:30-37` | `ensureXxx()` | 资料标签（**只写不读**） |
-| 20 | `research_reports` | `lib/schema-additions-research.ts:10-21` | `ensureXxx()` | 预留：报告主体（**当前未使用**） |
-| 21 | `research_runs` | `lib/schema-additions-research.ts:24-44` | `ensureXxx()` | 预留：每轮明细（**当前未使用**） |
 
 ---
 
@@ -598,41 +595,6 @@ resolveDbPath()                    db.ts:17-20
 
 ---
 
-### 2.19 `research_reports` / `research_runs` — 预建表（**当前无代码读写**）
-
-**创建者**：`lib/schema-additions-research.ts:8-45` 的 `ensureResearchTables()`。
-
-**`research_reports`**（`:10-21`）：
-
-| 列 | SQL 类型 | 可空 | 默认 | 含义 |
-|---|---|---|---|---|
-| `id` | TEXT | 否（PK） | — | 报告 id |
-| `topic` | TEXT | 否（NOT NULL） | — | 选题 |
-| `source_hint` | TEXT | 是 | — | 来源提示 |
-| `gathered_md` | TEXT | 是 | — | 搜集结果 Markdown |
-| `final_report_md` | TEXT | 是 | — | 终稿 Markdown |
-| `final_attempt` | INTEGER | 否（NOT NULL） | `1` | 终稿来自第几轮 |
-| `passed` | INTEGER | 否（NOT NULL） | `0` | 0/1 是否过线 |
-| `created_at` | INTEGER | 否（NOT NULL） | — | epoch ms |
-
-**`research_runs`**（`:24-44`）：
-
-| 列 | SQL 类型 | 可空 | 默认 | 含义 |
-|---|---|---|---|---|
-| `report_id` | TEXT | 否（NOT NULL，PK 之一） | — | → `research_reports.id`（未声明 FK） |
-| `attempt` | INTEGER | 否（NOT NULL，PK 之一） | — | 轮次 |
-| `draft_md` | TEXT | 是 | — | 该轮草稿 |
-| `review_json` | TEXT | 是 | — | 审查结果 JSON（issues / score / verdict） |
-| `verdict` | TEXT | 是 | — | `pass` / `revise` |
-| `issue_count` | INTEGER | 否（NOT NULL） | `0` | 问题数 |
-| `high_count` | INTEGER | 否（NOT NULL） | `0` | 高危问题数 |
-| `elapsed_ms` | INTEGER | 是 | — | 该轮耗时 |
-| `created_at` | INTEGER | 否（NOT NULL） | — | epoch ms |
-| `total_score` | INTEGER | 是 | — | 0-100 总分，best-of-N 选稿用；`ensureResearchTables` 幂等 ALTER 追加（`:41-44`） |
-
-主键复合 `(report_id, attempt)`；索引 `idx_research_runs_report(report_id)`（`:38`）。
-
-**读写点**：无。当前只有建表代码本身，没有任何查询或写入，两表属预留结构（见附录 · 附.1）。
 
 ---
 
@@ -837,9 +799,6 @@ category_specific_fragments: [{ tag, title, description, example, when_to_use, w
 - `keywords_json`：`string[]`。
 - `source_urls_json`：`string[]`（来自 `searchResults.map(r => r.url)`）。
 
-### 3.14 `research_runs.review_json`
-
-审查输出 JSON（issues / score / verdict）；`total_score` 由审查结果单独落列（`lib/schema-additions-research.ts:40-44` 的注释）。**当前无代码写入**（见附录 · 附.1）。
 
 ---
 
@@ -868,8 +827,6 @@ erDiagram
   local_assets ||--o{ article_images : "asset_id (logical)"
   articles ||--o{ article_diffs : "article_id (logical)"
   articles ||--o{ critic_runs : "article_id (logical)"
-
-  research_reports ||--o{ research_runs : "report_id (logical)"
   knowledge_base ||--o{ knowledge_base_tags : "knowledge_id (logical)"
 
   authors {
@@ -1041,7 +998,6 @@ erDiagram
 | `site_articles` | `(site_id, url_hash)` | 同一站点内同篇不重复 | `lib/db.ts:341` |
 | `local_assets` | `file_path` UNIQUE | 重扫跳过已有 | `lib/schema-additions-images.sql:6` |
 | `critic_runs` | `(article_id, platform, attempt)` | UPSERT 覆盖 | `lib/schema-additions-critic.ts:43` |
-| `research_runs` | `(report_id, attempt)` | UPSERT 覆盖（当前未使用） | `lib/schema-additions-research.ts:35` |
 | `fingerprint_category_profiles` | `(fingerprint_id, category)` | `INSERT OR REPLACE` 覆盖 | `lib/db.ts:224` |
 | `strategy_fragments_indexed` | 逻辑分组：`fingerprint_id` + `category` | 重提炼前先 DELETE 该组再插 | `app/api/fingerprint/v3/[id]/route.ts:358-361` |
 
@@ -1135,7 +1091,7 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_fp_articles_fp ON fingerprint_articles(f
 
 **D. 复合场景——既建表又补列，且补列后立刻建索引**
 
-`ensureResearchTables`（`lib/schema-additions-research.ts:8-45`）在建完两张表后，对 `research_runs` 再做一次 PRAGMA 补 `total_score`；`ensureFingerprintArticlesCategoryColumns`（`lib/db.ts:193-208`）补完三列后无条件重建分类索引。
+`ensureFingerprintArticlesCategoryColumns`（`lib/db.ts:193-208`）补完三列后无条件重建分类索引。
 
 ### 6.4 新增列 / 新表的操作清单
 
@@ -1212,7 +1168,6 @@ db.pragma('foreign_keys = ON');
 | `article_images` | `lib/schema-additions-images.sql:23-33` | 无读写。自动配图接口只把候选图返回前端，`local_assets.id → article_images.asset_id` 也从未写入。若将来要做「文章配图持久化」，需要补写侧 |
 | `knowledge_base` / `knowledge_base_tags` | `lib/schema-additions-knowledge-base.ts:9-37` | 只写不读。写入见 `app/api/compose/gather/route.ts:211-232`；没有查询 / 复用这些资料的 API 或页面 |
 | `strategies` | `lib/schema-additions-strategies.sql:4-13` | 只写不读。面向用户的碎片检索全部走 `strategy_fragments_indexed`（`app/api/strategies/search/route.ts:79`）；`fingerprint_json` 里 v2 的 `strategies` 数组另被 `lib/fingerprint-queries.ts:271` 用于计数，但那是 JSON 副本，不是这张表 |
-| `research_reports` / `research_runs` | `lib/schema-additions-research.ts:8-45` | 只建表，无读写；`review_json` 的实际 key 结构没有写入侧可参照 |
 
 相关约定：
 

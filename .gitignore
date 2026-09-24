@@ -38,3 +38,9 @@ npm-debug.log*
 
 # internal working notes (not part of the deliverable)
 internal/
+
+# 生成物：双击启动图标（.app 包）
+dist/
+
+# 启动器日志
+.bytrace-dev.log

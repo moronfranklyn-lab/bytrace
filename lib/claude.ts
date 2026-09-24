@@ -15,6 +15,7 @@ import {
   CLAUDE_BIN_KEYS,
   envStr,
   firstNonEmpty,
+  resolveReviewConfig,
 } from '@/lib/env';
 
 /**
@@ -73,6 +74,13 @@ export interface StreamClaudeOptions {
    * 文章产出传 ARTICLE_MODEL 降 AI 味；分析类（outline / critic）不传。
    */
   model?: string;
+  /**
+   * 任务类型，决定用哪一组模型配置。
+   * - 'agent'（默认）分析类：指纹 / 大纲 / 分类
+   * - 'article' 正文类：draft / refine
+   * - 'review'  审查类：critic 评分（走 BYTRACE_REVIEW_*，默认继承主 Agent）
+   */
+  task?: 'agent' | 'article' | 'review';
 }
 
 interface ApiStreamConfig {
@@ -117,31 +125,61 @@ function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/, '');
 }
 
-function resolveApiConfig(provider: Exclude<LlmProvider, 'claude-cli'>, requestedModel?: string): ApiStreamConfig {
+/**
+ * 按任务解析 API 配置。
+ *
+ * task:
+ *   'agent'   分析类：指纹 / 大纲 / 分类（走 BYTRACE_AGENT_MODEL）
+ *   'article' 正文类：draft / refine（走 BYTRACE_AGENT_ARTICLE_MODEL）
+ *   'review'  审查类：critic 评分（走 BYTRACE_REVIEW_*，**默认继承主 Agent**）
+ *
+ * 'review' 的意义：审稿和写作不该是同一个模型。
+ * 你可以在 .env.local 里把审查指向另一家（例如写作 MiMo、审查 DeepSeek），
+ * 不填则完全等同于改造前（critic 走主 Agent）。
+ */
+type ModelTask = 'agent' | 'article' | 'review';
+
+function resolveApiConfig(
+  provider: Exclude<LlmProvider, 'claude-cli'>,
+  requestedModel?: string,
+  task: ModelTask = 'agent',
+): ApiStreamConfig {
   const isResponses = provider === 'openai-responses';
+
+  // 审查任务优先用审查组的端点/key（缺省继承主 Agent）
+  const review = task === 'review' ? resolveReviewConfig() : null;
+
   const baseUrl = trimTrailingSlash(
     firstNonEmpty(
+      review?.baseUrl,
       envStr(...AGENT_BASE_URL_KEYS),
       isResponses ? 'https://api.openai.com/v1' : 'http://127.0.0.1:1234/v1',
     )!,
   );
-  const apiKey = envStr(...AGENT_API_KEY_KEYS) ?? '';
+  const apiKey = review ? review.apiKey : envStr(...AGENT_API_KEY_KEYS) ?? '';
+
   const modelFromRequest =
     requestedModel && requestedModel !== ARTICLE_MODEL ? requestedModel : '';
+
   const model =
     modelFromRequest ||
+    (task === 'review' && review?.model ? review.model : '') ||
     (requestedModel === ARTICLE_MODEL ? envStr(...AGENT_ARTICLE_MODEL_KEYS) ?? '' : '') ||
     envStr(...AGENT_MODEL_KEYS) ||
     '';
 
   if (!model) {
     throw new Error(
-      'API 模型未配置：请在 .env.local 设置 BYTRACE_AGENT_MODEL（正文可另设 BYTRACE_AGENT_ARTICLE_MODEL）。旧名 AUTOARTICLE_LLM_MODEL / OPENAI_MODEL 仍然兼容',
+      task === 'review'
+        ? '审查模型未配置：请在 .env.local 设置 BYTRACE_REVIEW_MODEL（不填则自动继承 BYTRACE_AGENT_MODEL）'
+        : 'API 模型未配置：请在 .env.local 设置 BYTRACE_AGENT_MODEL（正文可另设 BYTRACE_AGENT_ARTICLE_MODEL）。旧名 AUTOARTICLE_LLM_MODEL / OPENAI_MODEL 仍然兼容',
     );
   }
   if (isResponses && !apiKey) {
     throw new Error(
-      'OpenAI Responses API 需要 API key：请在 .env.local 设置 BYTRACE_AGENT_API_KEY（旧名 AUTOARTICLE_LLM_API_KEY / OPENAI_API_KEY 仍兼容）',
+      task === 'review'
+        ? '审查端点需要 API key：请在 .env.local 设置 BYTRACE_REVIEW_API_KEY'
+        : 'OpenAI Responses API 需要 API key：请在 .env.local 设置 BYTRACE_AGENT_API_KEY（旧名 AUTOARTICLE_LLM_API_KEY / OPENAI_API_KEY 仍兼容）',
     );
   }
   return { provider, baseUrl, apiKey, model };
@@ -288,8 +326,14 @@ async function streamOpenAiApi(
   options: StreamClaudeOptions,
   provider: Exclude<LlmProvider, 'claude-cli'>,
 ): Promise<string> {
-  const { onChunk, signal, timeoutMs = DEFAULT_TIMEOUT_MS, model: requestedModel } = options;
-  const config = resolveApiConfig(provider, requestedModel);
+  const {
+    onChunk,
+    signal,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    model: requestedModel,
+    task = 'agent',
+  } = options;
+  const config = resolveApiConfig(provider, requestedModel, task);
   const timeout = makeTimeoutSignal(signal, timeoutMs);
 
   const endpoint =
@@ -572,6 +616,25 @@ export function streamClaude(
   options: StreamClaudeOptions = {},
 ): Promise<string> {
   const provider = normalizeProvider();
+
+  // 审查任务：若审查组配了独立的 API 端点，就走 HTTP API，
+  // 即使主 Agent 正在用本机 CLI 订阅。这样「写作走 CLI 订阅 + 审查走 DeepSeek」
+  // 这种组合才成立；没配审查端点时行为与改造前完全一致。
+  if (options.task === 'review') {
+    const review = resolveReviewConfig();
+    const dedicatedReviewEndpoint =
+      Boolean(envStr('BYTRACE_REVIEW_BASE_URL') || envStr('BYTRACE_REVIEW_API_KEY'));
+    if (dedicatedReviewEndpoint) {
+      if (!review.baseUrl) {
+        throw new Error(
+          '审查模型配了 key 但没配端点：请在 .env.local 设置 BYTRACE_REVIEW_BASE_URL',
+        );
+      }
+      // 审查走 OpenAI 兼容协议（DeepSeek / MiMo / Kimi / GLM 等都是）
+      return streamOpenAiApi(prompt, options, 'openai-compatible');
+    }
+  }
+
   if (provider === 'codex-cli') {
     return streamCodexCli(prompt, options);
   }

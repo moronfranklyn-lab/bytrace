@@ -75,6 +75,24 @@ export async function GET() {
     });
   }
 
+  // ---- ①b 审查模型（critic 评分）----
+  const reviewReady = agent.reviewIsSeparate
+    ? Boolean(agent.reviewBaseUrl && agent.reviewModel && agent.reviewHasApiKey)
+    : agent.isLocalCli || Boolean(agent.hasApiKey && agent.model);
+  checks.push({
+    key: 'review',
+    label: agent.reviewIsSeparate ? '审查模型（critic · 跨模型互审）' : '审查模型（critic · 继承主 Agent）',
+    status: reviewReady ? 'ready' : 'missing',
+    detail: agent.reviewIsSeparate
+      ? reviewReady
+        ? `${agent.reviewBaseUrl} · 模型 ${agent.reviewModel} —— 写作与审查不是同一个模型，比自审严`
+        : `已配审查组但缺 key 或模型（base=${agent.reviewBaseUrl ?? '未配'} / model=${agent.reviewModel ?? '未配'}）`
+      : `未单独配置，critic 复用主 Agent（${agent.isLocalCli ? '本机 CLI' : agent.model ?? '未配置'}）。想换模型请填 BYTRACE_REVIEW_*`,
+    fix: reviewReady
+      ? undefined
+      : '填 BYTRACE_REVIEW_BASE_URL / BYTRACE_REVIEW_API_KEY / BYTRACE_REVIEW_MODEL（例如 DeepSeek），或删掉这三项让它继承主 Agent',
+  });
+
   // ---- ② 联网事实搜索 ----
   // 有效供应商：BYTRACE_SEARCH_PROVIDER 若为具体值就直接用；若为 auto 则按
   // MiMo（复用主 Agent key，无需额外账号）→ 豆包 → Tavily → 免 key 兜底 推导。

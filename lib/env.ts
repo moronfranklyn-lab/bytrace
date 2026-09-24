@@ -110,6 +110,68 @@ export const CODEX_ARTICLE_MODEL_KEYS = [
 ] as const;
 
 // ---------------------------------------------------------------------------
+// ①b 审查 / 调研模型（critic 评分、事实审查）
+//
+// 为什么要单独一组：**审稿和写作不该是同一个模型**。
+// 同模型自审容易认同自己的输出；换个模型挑刺会狠很多。
+// 典型配置：写作走 MiMo，审查走 DeepSeek。
+//
+// 兜底规则（重要）：这一组**默认继承主 Agent**。
+// 也就是说你不填任何 BYTRACE_REVIEW_*，行为与改造前完全一致（critic 走主 Agent）。
+// ---------------------------------------------------------------------------
+
+export const REVIEW_PROVIDER_KEYS = [
+  'BYTRACE_REVIEW_PROVIDER',
+  // 故意也读 AGENT_*：允许「只换模型不换端点」
+  ...AGENT_PROVIDER_KEYS,
+] as const;
+
+export const REVIEW_BASE_URL_KEYS = [
+  'BYTRACE_REVIEW_BASE_URL',
+  ...AGENT_BASE_URL_KEYS,
+] as const;
+
+export const REVIEW_API_KEY_KEYS = [
+  'BYTRACE_REVIEW_API_KEY',
+  ...AGENT_API_KEY_KEYS,
+] as const;
+
+export const REVIEW_MODEL_KEYS = [
+  'BYTRACE_REVIEW_MODEL',
+  ...AGENT_MODEL_KEYS,
+] as const;
+
+/** 审查组是否真的用了「另一个」模型（用于 health 提示与日志） */
+export function resolveReviewConfig(): {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  /** 是否配了独立的审查端点/key/模型（false = 继承主 Agent，等同改造前） */
+  isSeparate: boolean;
+} {
+  const dedicatedBase = envStr('BYTRACE_REVIEW_BASE_URL');
+  const dedicatedKey = envStr('BYTRACE_REVIEW_API_KEY');
+  const dedicatedModel = envStr('BYTRACE_REVIEW_MODEL');
+
+  const agentBase = envStr(...AGENT_BASE_URL_KEYS) ?? '';
+  const agentKey = envStr(...AGENT_API_KEY_KEYS) ?? '';
+  const agentModel = envStr(...AGENT_MODEL_KEYS) ?? '';
+
+  // 只有「审查端点与主 Agent 相同」时才允许复用它那把 key，
+  // 避免把 A 家的 key 发到 B 家去。
+  const effectiveBase = dedicatedBase ?? agentBase;
+  const reuseAgentKey = dedicatedBase === undefined || dedicatedBase === agentBase;
+  const effectiveKey = dedicatedKey ?? (reuseAgentKey ? agentKey : '');
+
+  return {
+    baseUrl: effectiveBase,
+    apiKey: effectiveKey,
+    model: dedicatedModel ?? agentModel,
+    isSeparate: Boolean(dedicatedBase || dedicatedKey || dedicatedModel),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // ② 联网事实搜索（compose 事实底座 + 博主名搜索）
 // ---------------------------------------------------------------------------
 
@@ -191,6 +253,14 @@ export interface AgentConfigView {
   isLocalCli: boolean;
   /** 是否指向小米 MiMo（决定 web_search 插件能否复用主 Agent 的 key） */
   isMimo: boolean;
+  /** 审查/调研模型端点 */
+  reviewBaseUrl: string | undefined;
+  /** 审查模型名 */
+  reviewModel: string | undefined;
+  /** 审查模型是否独立于主 Agent（true = 跨模型互审） */
+  reviewIsSeparate: boolean;
+  /** 审查模型是否具备可用 key */
+  reviewHasApiKey: boolean;
 }
 
 export interface SearchConfigView {
@@ -292,6 +362,7 @@ export function getAgentConfigView(): AgentConfigView {
   const apiKey = envStr(...AGENT_API_KEY_KEYS);
   const model = envStr(...AGENT_MODEL_KEYS);
   const articleModel = envStr(...AGENT_ARTICLE_MODEL_KEYS);
+  const review = resolveReviewConfig();
   return {
     provider,
     baseUrl,
@@ -300,6 +371,10 @@ export function getAgentConfigView(): AgentConfigView {
     articleModel,
     isLocalCli: provider === 'claude-cli' || provider === 'codex-cli',
     isMimo: Boolean(baseUrl && baseUrl.includes('xiaomimimo.com')),
+    reviewBaseUrl: review.baseUrl || undefined,
+    reviewModel: review.model || undefined,
+    reviewIsSeparate: review.isSeparate,
+    reviewHasApiKey: Boolean(review.apiKey),
   };
 }
 

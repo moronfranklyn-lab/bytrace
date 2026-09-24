@@ -76,6 +76,10 @@ export async function runSingleCritic(
     raw = await streamClaude(prompt, {
       signal,
       timeoutMs: CRITIC_TIMEOUT_MS,
+      // 审查走独立的模型组（BYTRACE_REVIEW_*）。
+      // 不配则自动继承主 Agent —— 行为与改造前完全一致。
+      // 配了就是跨模型互审：写作 MiMo、审查 DeepSeek，比自审狠。
+      task: 'review',
     });
   } catch (err) {
     return {

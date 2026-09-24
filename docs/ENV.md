@@ -16,8 +16,14 @@
 
 | 用途 | 供应商 | 关键变量 |
 | --- | --- | --- |
-| 主 Agent | **MiMo（小米）** | `BYTRACE_AGENT_BASE_URL=https://api.xiaomimimo.com/v1` + `BYTRACE_AGENT_API_KEY` |
+| 主 Agent（写作） | **MiMo（小米）** | `BYTRACE_AGENT_BASE_URL=https://api.xiaomimimo.com/v1` + `BYTRACE_AGENT_API_KEY` |
 | 联网事实搜索 | **MiMo 自带的 web_search 插件** | `BYTRACE_SEARCH_PROVIDER=mimo` —— **复用上面同一个 key，不需要第二个账号** |
+| 审查（critic 评分） | **DeepSeek** | `BYTRACE_REVIEW_*` —— **换一个模型审你的文章，比自审狠** |
+
+> **为什么审查要单独一家**：MiMo 写文章、MiMo 审自己，容易认同自己的输出。
+> 换成 DeepSeek 审就是**跨模型互审** —— 这是原本 `/research` 深度调研链路里最有价值的一环，
+> 那个页面已确认不要了，但这一环用 `BYTRACE_REVIEW_*` 单独保留了下来。
+> **不填 `BYTRACE_REVIEW_*` 则自动继承主 Agent**，行为与改造前一致。
 
 > **✅ 结论：主 Agent 和联网搜索只需要一个 MiMo key。**
 > MiMo 的 `web_search` 是「挂在对话模型上的联网工具」，直接复用主 Agent 的 key 与端点。
@@ -104,6 +110,33 @@ BYTRACE_*   →   AUTOARTICLE_*   →   OPENAI_*   →   内置默认值
 | 正文类模型 | `BYTRACE_AGENT_ARTICLE_MODEL` | `AUTOARTICLE_LLM_ARTICLE_MODEL` | `AUTOARTICLE_ARTICLE_MODEL` |
 
 > 解析在 `lib/claude.ts` 的 `resolveApiConfig()`，取值器统一走 `lib/env.ts`。模型为空时抛错并提示该填哪个变量。
+
+### 3.1b 模型 · 审查组（critic 评分，可选但推荐）
+
+**目的**：让「审稿」和「写稿」不是同一个模型。
+
+| 变量（新名优先） | 必填 | 默认 | 作用 |
+| --- | --- | --- | --- |
+| `BYTRACE_REVIEW_PROVIDER` | 否 | 继承 `BYTRACE_AGENT_PROVIDER` | 审查供应商 |
+| `BYTRACE_REVIEW_BASE_URL` | 填了 key 就必填 | 继承主 Agent 端点 | 审查端点。例：`https://api.deepseek.com/v1` |
+| `BYTRACE_REVIEW_API_KEY` | 否 | 见下方「key 复用规则」 | 审查 key |
+| `BYTRACE_REVIEW_MODEL` | 否 | 继承 `BYTRACE_AGENT_MODEL` | 审查模型。例：`deepseek-reasoner` / `deepseek-chat` |
+
+**兜底与安全规则（重要）**：
+
+1. **完全不填这一组** → critic 走主 Agent，**行为与改造前完全一致**。
+2. **只填 `BYTRACE_REVIEW_MODEL`**（不填端点和 key）→ 复用主 Agent 的端点与 key，只换模型名。
+3. **填了 `BYTRACE_REVIEW_BASE_URL` 且与主 Agent 端点不同** → **不会**把主 Agent 的 key 发过去，
+   必须显式填 `BYTRACE_REVIEW_API_KEY`（避免把 A 家的 key 泄露给 B 家）。
+4. **主 Agent 用本机 CLI 时也能跨模型审查**：只要填了审查端点，
+   critic 就走 HTTP API 打到那家，写作仍走 CLI 订阅。
+
+> **协议**：审查组按 **OpenAI 兼容协议**调用（DeepSeek / MiMo / Kimi / GLM / 方舟 都是），
+> 所以换任何一家都不用改代码。
+
+> **实测提示**：`deepseek-reasoner` 是推理模型，审一篇**会慢一些**（思考耗时），
+> 但 critic 输出只是一个几十行的评分 JSON，成本很低。觉得慢就在 `.env.local` 里
+> 把它换成 `deepseek-chat`，效果差别通常不大。
 
 ### 3.2 模型 · Codex CLI
 

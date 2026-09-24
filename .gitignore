@@ -26,3 +26,6 @@ data/*.db-shm
 npm-debug.log*
 .idea/
 .vscode/
+
+# stray root db (real db lives in data/)
+/autoarticle.db

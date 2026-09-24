@@ -52,6 +52,6 @@ E 的 compose Step 6 把它作为 `<Panel>` 的 children 挂载。所有样式�
 
 ## 已知 / 遗留
 
-- 247→16：目录里目前只有 16 张，等楠把素材补齐后再跑一次脚本即可。
+- 247→16：目录里目前只有 16 张，等Ethan把素材补齐后再跑一次脚本即可。
 - 站点爬取勾选项暂禁用，等 F0 的 crawler 接通后改成 enabled。
 - "进一步用 Claude 打 tag"按钮还没接，下一轮可以在 `/api/assets/scan` 加 `enrich=true` 参数让它读路径关键词再增补 tags。

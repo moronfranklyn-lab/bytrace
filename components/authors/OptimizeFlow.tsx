@@ -500,7 +500,7 @@ function ErrorCard({ error, onRetry }: { error: ErrorState; onRetry: () => void 
           <line x1="12" y1="9" x2="12" y2="13" />
           <line x1="12" y1="17" x2="12.01" y2="17" />
         </svg>
-        <span>这次模型卡住了，我们换个角度再试一次</span>
+        <span>这次没生成出来，我们换个角度再试一次</span>
       </div>
       <p className="warm-error-desc">{error.message}</p>
       {error.detail && <pre className="warm-error-detail">{error.detail}</pre>}

@@ -88,9 +88,14 @@ export default function TopicsPage() {
         { method: 'GET', signal: ctrl.signal, headers: { Accept: 'text/event-stream' } },
       );
     } catch (err) {
+      // 切 tab / 重新生成会主动 abort 上一轮请求，这是正常操作，不展示红色错误框。
+      if ((err as Error).name === 'AbortError' || ctrl.signal.aborted) {
+        setter((s) => ({ ...s, loading: false, rawTail: '' }));
+        return;
+      }
       setter({
         ...INITIAL,
-        error: (err as Error).name === 'AbortError' ? '已取消' : '连不上后端，看看 dev 是不是挂了',
+        error: '连不上后端，看看 dev 是不是挂了',
       });
       return;
     }
@@ -103,7 +108,10 @@ export default function TopicsPage() {
     const reader = res.body.getReader();
     try {
       for await (const evt of readSseEvents(reader)) {
-        if (ctrl.signal.aborted) break;
+        if (ctrl.signal.aborted) {
+          setter((s) => ({ ...s, loading: false, rawTail: '' }));
+          break;
+        }
         if (evt.event === 'chunk') {
           const t = (evt.data as { text?: string }).text || '';
           setter((s) => ({ ...s, rawTail: (s.rawTail + t).slice(-400) }));
@@ -125,10 +133,14 @@ export default function TopicsPage() {
         }
       }
     } catch (err) {
-      if ((err as Error).name === 'AbortError' || ctrl.signal.aborted) return;
+      // 主动取消不算失败，不要显示“卡住了”。
+      if ((err as Error).name === 'AbortError' || ctrl.signal.aborted) {
+        setter((s) => ({ ...s, loading: false, rawTail: '' }));
+        return;
+      }
       setter({
         ...INITIAL,
-        error: '流式中断：' + (err as Error).message,
+        error: '生成中断：' + (err as Error).message,
       });
     }
   }, []);
@@ -206,7 +218,7 @@ export default function TopicsPage() {
                 <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
                 <line x1="12" y1="9" x2="12" y2="13" />
               </svg>
-              <span>这次模型卡住了</span>
+              <span>这次没生成出来</span>
             </div>
             <p className="warm-error-desc">{state.error}</p>
           </div>

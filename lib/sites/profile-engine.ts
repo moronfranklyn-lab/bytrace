@@ -23,6 +23,9 @@ import {
 
 export const MIN_ARTICLES_FOR_PROFILE = 3;
 export const MAX_ARTICLES_FOR_PROFILE = 20;
+/** 加样本时按时间线尽量抓最近一个月；上限只是防死循环/异常页面。 */
+export const MAX_NEW_ARTICLES_PER_PATCH = 50;
+export const RECENT_ARTICLE_WINDOW_DAYS = 31;
 const PER_FETCH_SLEEP_MS = 1000;
 const MIN_CONTENT_LENGTH = 200;
 
@@ -44,11 +47,33 @@ function sleep(ms: number): Promise<void> {
  *   - 已存在 → 跳过
  *   - 新的    → 逐篇 crawl，成功的写入 site_articles + crawled_articles
  */
+function parsePublishTimeMs(raw?: string | null): number | null {
+  if (!raw) return null;
+  const normalized = raw
+    .trim()
+    .replace(/年|\//g, '-')
+    .replace(/月/g, '-')
+    .replace(/日/g, '')
+    .replace(/\s+/g, ' ');
+  const direct = Date.parse(normalized);
+  if (!Number.isNaN(direct)) return direct;
+  const m = normalized.match(/(20\d{2})-(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?/);
+  if (!m) return null;
+  return new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    m[4] ? Number(m[4]) : 0,
+    m[5] ? Number(m[5]) : 0,
+  ).getTime();
+}
+
 export async function fetchArticlesWithDedupe(
   siteId: string,
   candidateUrls: string[],
   iteration: number,
   maxNewArticles: number = MAX_ARTICLES_FOR_PROFILE,
+  options: { recentDays?: number } = {},
 ): Promise<DedupeFetchResult> {
   const db = getDb();
   const result: DedupeFetchResult = {
@@ -80,14 +105,14 @@ export async function fetchArticlesWithDedupe(
   );
 
   const linkStmt = db.prepare(
-    `INSERT OR IGNORE INTO site_articles (site_id, url_hash, url, title, added_at, iteration)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO site_articles (site_id, url_hash, url, title, added_at, iteration, publish_time)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
   const crawledStmt = db.prepare(
     `INSERT OR IGNORE INTO crawled_articles
        (id, author_id, url, url_hash, title, content, category, images_json,
-        source_type, used_in_fingerprint_id, crawled_at, medium)
-     VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?)`,
+        source_type, used_in_fingerprint_id, crawled_at, medium, publish_time)
+     VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?)`,
   );
 
   for (let i = 0; i < candidateUrls.length; i++) {
@@ -118,19 +143,37 @@ export async function fetchArticlesWithDedupe(
     }
 
     const now = Date.now();
+    if (options.recentDays) {
+      const publishMs = parsePublishTimeMs(ca.publish_time);
+      const cutoff = now - options.recentDays * 24 * 60 * 60 * 1000;
+      // 抓不到发布时间时保守保留；抓到且早于窗口则跳过，不进入样本库。
+      if (publishMs && publishMs < cutoff) {
+        result.failed.push({
+          url,
+          reason: `发布时间 ${ca.publish_time} 早于最近 ${options.recentDays} 天，已按时间线跳过`,
+        });
+        continue;
+      }
+    }
+
     try {
-      linkStmt.run(siteId, hash, ca.url, ca.title ?? null, now, iteration);
-      crawledStmt.run(
-        nanoid(14),
-        ca.url,
-        hash,
-        ca.title ?? null,
-        ca.content,
-        ca.images ? JSON.stringify(ca.images) : null,
-        ca.source,
-        now,
-        ca.medium ?? 'text',
-      );
+      // 两条 insert 必须同进同退：site_articles 先成功、crawled_articles 再失败
+      // 会让这条 URL 永远被判"已存在"却取不到正文，所以包进同一个事务
+      db.transaction(() => {
+        linkStmt.run(siteId, hash, ca.url, ca.title ?? null, now, iteration, ca.publish_time ?? null);
+        crawledStmt.run(
+          nanoid(14),
+          ca.url,
+          hash,
+          ca.title ?? null,
+          ca.content,
+          ca.images ? JSON.stringify(ca.images) : null,
+          ca.source,
+          now,
+          ca.medium ?? 'text',
+          ca.publish_time ?? null,
+        );
+      })();
     } catch (err) {
       result.failed.push({
         url,
@@ -161,19 +204,20 @@ export function loadHistorySamples(
   const db = getDb();
   const rows = db
     .prepare(
-      `SELECT sa.url, sa.title, ca.content
+      `SELECT sa.url, sa.title, COALESCE(sa.publish_time, ca.publish_time) AS publish_time, ca.content
        FROM site_articles sa
        JOIN crawled_articles ca ON ca.url_hash = sa.url_hash
        WHERE sa.site_id = ?
        ORDER BY sa.added_at DESC
        LIMIT ?`,
     )
-    .all(siteId, maxN) as { url: string; title: string | null; content: string | null }[];
+    .all(siteId, maxN) as { url: string; title: string | null; publish_time: string | null; content: string | null }[];
   return rows
     .filter((r) => r.content && r.content.length >= MIN_CONTENT_LENGTH)
     .map((r) => ({
       title: r.title ?? undefined,
       url: r.url,
+      publish_time: r.publish_time ?? undefined,
       content: r.content as string,
     }));
 }

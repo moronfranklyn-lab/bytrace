@@ -40,6 +40,28 @@ function collectArticleUrls(html: string): string[] {
   return Array.from(urls);
 }
 
+function extractPublishTime($: cheerio.CheerioAPI): string | null {
+  const meta =
+    $('meta[property="article:published_time"]').attr('content')?.trim() ||
+    $('meta[property="og:article:published_time"]').attr('content')?.trim() ||
+    $('meta[itemprop="datePublished"]').attr('content')?.trim() ||
+    $('time[datetime]').first().attr('datetime')?.trim();
+  if (meta) return meta;
+
+  const candidates = [
+    '.article--meta', '.article-meta', '.post-meta', '.meta', '.time', '.date', '.publish-time', '.article-info',
+  ];
+  for (const sel of candidates) {
+    const text = $(sel).first().text().replace(/\s+/g, ' ').trim();
+    const match = text.match(/20\d{2}[\/\-.年]\s*\d{1,2}[\/\-.月]\s*\d{1,2}(?:日)?(?:\s+\d{1,2}:\d{2})?/);
+    if (match) return match[0];
+  }
+
+  const bodyText = $('body').text().replace(/\s+/g, ' ').slice(0, 2000);
+  const match = bodyText.match(/20\d{2}[\/\-.年]\s*\d{1,2}[\/\-.月]\s*\d{1,2}(?:日)?(?:\s+\d{1,2}:\d{2})?/);
+  return match?.[0] ?? null;
+}
+
 export const adapter: SiteAdapter = {
   id: 'woshipm',
   platform: '人人都是产品经理',
@@ -91,6 +113,7 @@ export const adapter: SiteAdapter = {
 
     const content = extractTextFromContainer($, $container);
     const images = extractImagesFromContainer($, $container, url.toString());
+    const publishTime = extractPublishTime($);
 
     if (!content || content.length < 60) return crawlGeneric(url);
 
@@ -102,6 +125,7 @@ export const adapter: SiteAdapter = {
       images,
       source: 'cheerio',
       host: url.hostname,
+      publish_time: publishTime,
     };
   },
 

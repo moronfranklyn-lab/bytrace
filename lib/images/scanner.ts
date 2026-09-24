@@ -4,11 +4,11 @@ import { nanoid } from 'nanoid';
 import { getDb } from '@/lib/db';
 
 /**
- * Default location of 楠's local image library on his machine.
+ * Default location of Ethan's local image library on his machine.
  * The scanner uses this when no explicit path is passed.
  */
 export const DEFAULT_LOCAL_ASSETS_ROOT =
-  '/Users/nan/ai资料合集/项目合集/公众号/公众号配图';
+  '/Users/mixingtumima0000/资料合集/项目合集/公众号/公众号配图';
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
 

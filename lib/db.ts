@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { ensureCriticRunsTable } from '@/lib/schema-additions-critic';
 import { ensureGatherRunsTable } from '@/lib/schema-additions-gather';
 import { ensureResearchTables } from '@/lib/schema-additions-research';
+import { ensureKnowledgeBaseTable } from '@/lib/schema-additions-knowledge-base';
 
 /**
  * 单例 SQLite 连接。
@@ -336,6 +337,7 @@ function ensureSiteArticlesTable(db: Database.Database) {
       title TEXT,
       added_at INTEGER NOT NULL,
       iteration INTEGER NOT NULL DEFAULT 1,
+      publish_time TEXT,
       PRIMARY KEY (site_id, url_hash)
     )
   `);
@@ -374,6 +376,21 @@ function ensureCrawledArticlesMediumColumn(db: Database.Database) {
   const names = new Set(cols.map((c) => c.name));
   if (!names.has('medium')) {
     db.exec(`ALTER TABLE crawled_articles ADD COLUMN medium TEXT DEFAULT 'text'`);
+  }
+  if (!names.has('publish_time')) {
+    db.exec(`ALTER TABLE crawled_articles ADD COLUMN publish_time TEXT`);
+  }
+}
+
+function ensureSiteArticlesPublishTimeColumn(db: Database.Database) {
+  const tbl = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='site_articles'`)
+    .get();
+  if (!tbl) return;
+  const cols = db.prepare(`PRAGMA table_info(site_articles)`).all() as { name: string }[];
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has('publish_time')) {
+    db.exec(`ALTER TABLE site_articles ADD COLUMN publish_time TEXT`);
   }
 }
 
@@ -448,6 +465,7 @@ export function getDb(): Database.Database {
 
   // 站点画像 ↔ 已用样本关联表（幂等）
   ensureSiteArticlesTable(db);
+  ensureSiteArticlesPublishTimeColumn(db);
   ensureSitesIterationColumn(db);
 
   // 博主指纹 ↔ 已用样本关联表 + 迭代计数列（幂等）
@@ -470,6 +488,9 @@ export function getDb(): Database.Database {
 
   // v3.5 · compose 主流程的 Codex 联网搜集缓存（按 idea_hash 幂等）
   ensureGatherRunsTable(db);
+
+  // v3.6 · 知识资料库：保存搜索整理后的素材，便于查询和复用
+  ensureKnowledgeBaseTable(db);
 
   // 配图视觉打标标志列：1 = 已经过 Claude 视觉分类（区别于扫描时的启发式打标）（幂等）
   ensureLocalAssetsAiTaggedColumn(db);

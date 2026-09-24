@@ -14,6 +14,7 @@ import {
   type FingerprintMeta,
 } from '@/lib/composition';
 import type { PlatformKey } from '@/lib/platforms';
+import { parseRefineVersions, type RefineVersionEntry } from '@/lib/refine-versions';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -28,13 +29,6 @@ interface IncomingPayload {
   article_id?: string;
   /** v3 新增：composition（如果没有 article_id，可直接传） */
   composition?: Composition;
-}
-
-interface RefineVersionEntry {
-  ts: number;
-  source_platform: PlatformKey;
-  target_platform: PlatformKey;
-  content_md: string;
 }
 
 function jsonError(message: string, status = 400) {
@@ -66,20 +60,37 @@ export async function POST(req: NextRequest) {
 
   // 尝试拉 composition：优先 article_id，其次 body.composition
   let composition: Composition | null = body.composition ?? null;
-  let articleRow: { id: string; refine_versions_json: string | null } | null = null;
+  let articleRow: {
+    id: string;
+    refine_versions_json: string | null;
+    platform_target: string | null;
+    created_at: number;
+  } | null = null;
   try {
     ensureComposeColumns();
     if (body.article_id) {
       const db = getDb();
       const row = db
         .prepare(
-          `SELECT id, composition_json, refine_versions_json FROM articles WHERE id = ?`,
+          `SELECT id, composition_json, refine_versions_json, platform_target, created_at
+           FROM articles WHERE id = ?`,
         )
         .get(body.article_id) as
-        | { id: string; composition_json: string | null; refine_versions_json: string | null }
+        | {
+            id: string;
+            composition_json: string | null;
+            refine_versions_json: string | null;
+            platform_target: string | null;
+            created_at: number;
+          }
         | undefined;
       if (row) {
-        articleRow = { id: row.id, refine_versions_json: row.refine_versions_json };
+        articleRow = {
+          id: row.id,
+          refine_versions_json: row.refine_versions_json,
+          platform_target: row.platform_target,
+          created_at: row.created_at,
+        };
         if (!composition && row.composition_json) {
           try {
             composition = JSON.parse(row.composition_json) as Composition;
@@ -133,6 +144,7 @@ export async function POST(req: NextRequest) {
       raw = await streamClaude(prompt, {
         model: ARTICLE_MODEL, // 润色走 Sonnet 4.6 降 AI 味
         signal: abortSignal,
+        timeoutMs: 240_000, // 全文重写，默认 180s 对长文不够
         onChunk: (text) => send('chunk', { text }),
       });
     } catch (err) {
@@ -142,17 +154,18 @@ export async function POST(req: NextRequest) {
 
     const refined = stripMarkdownFence(raw);
 
-    // 落库：append 到 refine_versions_json 数组
+    // 落库：先把旧数据归一成数组（兼容 draft route 写的 dict 形态，避免整列覆盖
+    // 抹掉多平台版本），再 append 这次的润色结果
     if (articleRow) {
       try {
         const db = getDb();
-        let arr: RefineVersionEntry[] = [];
-        if (articleRow.refine_versions_json) {
-          try {
-            const p = JSON.parse(articleRow.refine_versions_json);
-            if (Array.isArray(p)) arr = p as RefineVersionEntry[];
-          } catch {/* ignore */}
-        }
+        const arr: RefineVersionEntry[] = parseRefineVersions(
+          articleRow.refine_versions_json,
+          {
+            fallbackTs: articleRow.created_at,
+            mainPlatform: articleRow.platform_target ?? undefined,
+          },
+        );
         arr.push({
           ts: Date.now(),
           source_platform: sourcePlatform,

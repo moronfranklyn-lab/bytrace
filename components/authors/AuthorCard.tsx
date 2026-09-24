@@ -38,7 +38,7 @@ export function AuthorCard({ item, index = 0 }: Props) {
           <h3 className="fp-name" style={{ margin: 0 }}>{item.name}</h3>
           <p className="fp-stats" style={{ margin: '2px 0 0' }}>
             {item.versionCount > 1 ? `${item.versionCount} 版指纹` : '首版指纹'}
-            {' · '}
+            {' · 更新 '}
             {formatDate(item.lastTouchedAt)}
           </p>
         </div>

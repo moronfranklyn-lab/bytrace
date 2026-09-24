@@ -63,9 +63,19 @@ const PLATFORM_OPTIONS = [
   { value: '其他', label: '其他' },
 ];
 
-const CATEGORIES = ['观点', '案例', '教学', '评论', '杂感'];
+const CATEGORIES = [
+  { value: '', label: '自动分类' },
+  { value: '科技', label: '科技' },
+  { value: '经济金融', label: '经济金融' },
+  { value: '知识科普', label: '知识科普' },
+  { value: '生活情感', label: '生活情感' },
+  { value: '职场创业', label: '职场创业' },
+  { value: '文化娱乐', label: '文化娱乐' },
+  { value: '时事评论', label: '时事评论' },
+  { value: '健康医学', label: '健康医学' },
+];
 
-const MIN_ARTICLES = 5;      // 点「开始拆解」的下限（5 篇起步才能拆出风格）
+const MIN_ARTICLES = 5;      // 点「开始拆解」的下限：自动扒作者文章后，至少 5 篇就绪再拆
 const INITIAL_CARDS = 1;     // 页面初始显示几张卡（轻盈一点，按需 +）
 const MAX_ARTICLES = 20;
 const MIN_PASTE_CHARS = 80;
@@ -76,7 +86,7 @@ function newCard(): CardData {
   return {
     id: _seq++,
     mode: 'url',
-    category: '观点',
+    category: '',
     url: '',
     urlPreview: null,
     pasteTitle: '',
@@ -221,8 +231,6 @@ export default function NewFingerprintPage() {
         full_length?: number;
         platform?: string | null;
         hint?: string;
-        apify_cost_usd?: number | null;
-        apify_platform?: string | null;
         // index 模式返回字段
         author_name?: string | null;
         article_urls?: string[];
@@ -261,7 +269,7 @@ export default function NewFingerprintPage() {
         handleSearchedUrls(urls, { silent: true });
         useToastStore
           .getState()
-          .show(`识别为主页，拉到 ${urls.length} 篇文章。正在自动逐篇试爬…`, 'success');
+          .show(`识别为主页/专栏，拉到 ${urls.length} 篇文章。正在自动逐篇试爬…`, 'success');
         // 等 state 写入后再触发批量爬；批量进入时禁止再次展开 index
         setTimeout(() => {
           void tryCrawlAll({ allowExpandIndex: false });
@@ -280,14 +288,6 @@ export default function NewFingerprintPage() {
           platform: json.platform ?? null,
         },
       });
-      if (typeof json.apify_cost_usd === 'number' && json.apify_cost_usd > 0) {
-        const cost =
-          json.apify_cost_usd < 0.01
-            ? `$${json.apify_cost_usd.toFixed(4)}`
-            : `$${json.apify_cost_usd.toFixed(3)}`;
-        const platform = json.platform || 'Apify';
-        useToastStore.getState().show(`${platform} 抓完了，本次消耗 ${cost}`, 'success');
-      }
     } catch (err) {
       updateCard(card.id, {
         status: 'crawl-failed',
@@ -376,7 +376,7 @@ export default function NewFingerprintPage() {
           return {
             mode: 'url' as const,
             url: c.url.trim(),
-            category: c.category,
+            ...(c.category ? { category: c.category } : {}),
             title: c.urlPreview?.title ?? undefined,
             platform: inferPlatformFromUrl(c.url.trim()),
           };
@@ -385,7 +385,7 @@ export default function NewFingerprintPage() {
           mode: 'paste' as const,
           title: c.pasteTitle.trim() || undefined,
           content: c.pasteContent.trim(),
-          category: c.category,
+          ...(c.category ? { category: c.category } : {}),
           platform: defaultPlatform,
         };
       }),
@@ -584,7 +584,7 @@ export default function NewFingerprintPage() {
     if (!opts?.silent) {
       useToastStore
         .getState()
-        .show(`已把 ${urls.length} 条链接填到上方卡片，请点"试爬"逐个抓`, 'success');
+        .show(`已把 ${urls.length} 条链接放进样本池，接下来会自动试爬`, 'success');
     }
   }, []);
 
@@ -596,9 +596,9 @@ export default function NewFingerprintPage() {
           <h1 className="hero-title" style={{ fontSize: 38, margin: '0 0 10px' }}>
             拆解一个<em>新博主</em>
           </h1>
-          <p className="hero-subtitle" style={{ fontSize: 15, maxWidth: 660 }}>
-            5 篇起步。同一博主、不同类别（观点 / 案例 / 教学 / 评论 / 杂感）各来一篇，让工具能闻到他的全部味道。
-            URL 模式优先；公众号不爬，留正文模式兜底。
+          <p className="hero-subtitle" style={{ fontSize: 15, maxWidth: 760 }}>
+            现在按 v3 方法拆：优先贴作者主页 / 专栏页，工具自动扒最近文章、逐篇试爬、自动分类，
+            再跑 stage1 + stage2 + stage3 合成指纹。只有抓不动时，才手贴正文兜底。
           </p>
         </header>
 
@@ -646,12 +646,12 @@ export default function NewFingerprintPage() {
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
             </select>
-            <span className="intake-hint">公众号文章爬不动，请用正文模式贴。</span>
+            <span className="intake-hint">可不指定。URL 样本会按域名推断；类别默认由 stage0 自动判断。</span>
           </div>
 
           <div className="intake-row">
             <div className="cards-head">
-              <span className="intake-label">把代表作粘进来 · 至少 5 篇</span>
+              <span className="intake-label">样本池 · 自动分类 · 至少 {MIN_ARTICLES} 篇就绪</span>
               <span className="intake-hint">
                 就绪 {cards.filter(cardIsReady).length} / 共 {cards.length} 张 · 上限 {MAX_ARTICLES}
               </span>
@@ -775,7 +775,7 @@ export default function NewFingerprintPage() {
                   <line x1="12" y1="9" x2="12" y2="13" />
                   <line x1="12" y1="17" x2="12.01" y2="17" />
                 </svg>
-                <span>这次卡住了，回到输入换个角度</span>
+                <span>这次没生成出来，回到输入换个角度</span>
               </div>
               <p className="warm-error-desc">{errorState.message}</p>
               {errorState.detail && (
@@ -860,7 +860,7 @@ function ArticleCard({
           disabled={disabled}
         >
           {CATEGORIES.map((c) => (
-            <option key={c} value={c}>{c}</option>
+            <option key={c.value} value={c.value}>{c.label}</option>
           ))}
         </select>
         <div className="intake-mode-toggle">
@@ -1055,22 +1055,22 @@ function BatchPastePanel({
   return (
     <section className="batch-paste-panel">
       <div className="batch-paste-head">
-        <span className="batch-paste-title">批量粘贴 URL</span>
+        <span className="batch-paste-title">作者主页 / 文章列表</span>
         <span className="batch-paste-hint">
-          从博主主页复制文章 URL，一行一个；也可以贴一个主页 URL，工具会自动展开
+          推荐贴作者主页或专栏页，工具会自动展开；也可以一行一个贴文章 URL
         </span>
       </div>
       <textarea
         className="intake-input batch-paste-textarea"
         rows={3}
-        placeholder={'https://www.woshipm.com/u/1288862\nhttps://sspai.com/post/12345\nhttps://www.woshipm.com/ai/6401832.html'}
+        placeholder={'优先贴作者主页：\nhttps://www.woshipm.com/u/1288862\n\n也可以贴多篇文章：\nhttps://sspai.com/post/12345\nhttps://www.woshipm.com/ai/6401832.html'}
         value={text}
         onChange={(e) => setText(e.target.value)}
         disabled={disabled}
       />
       <div className="batch-paste-foot">
         <span className="batch-paste-count">
-          {urls.length > 0 ? `识别到 ${urls.length} 个 URL` : '还没识别到合法 URL'}
+          {urls.length > 0 ? `识别到 ${urls.length} 个 URL，主页会自动展开成文章` : '还没识别到合法 URL'}
         </span>
         <button
           type="button"
@@ -1078,7 +1078,7 @@ function BatchPastePanel({
           onClick={submit}
           disabled={disabled || urls.length === 0}
         >
-          灌入卡片并自动试爬
+          自动扒文章并试爬
         </button>
       </div>
     </section>

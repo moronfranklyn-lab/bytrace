@@ -78,10 +78,33 @@ function unsplashToCandidate(p: UnsplashPhoto): SlotCandidate {
 }
 
 function tokenize(s: string): string[] {
-  return s
+  // 先按标点符号分词
+  const chunks = s
     .split(/[\s,，、·/|]+/g)
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
+
+  // 对中文短语进一步拆分成 2-4 字的 n-gram（适合搜索）
+  const result: string[] = [];
+  for (const chunk of chunks) {
+    result.push(chunk); // 保留原始词
+
+    // 如果是纯中文且长度 > 2，生成 2-3 字的子串
+    if (/^[一-龥]+$/.test(chunk) && chunk.length > 2) {
+      for (let i = 0; i < chunk.length; i++) {
+        // 2字词
+        if (i + 2 <= chunk.length) {
+          result.push(chunk.slice(i, i + 2));
+        }
+        // 3字词
+        if (i + 3 <= chunk.length) {
+          result.push(chunk.slice(i, i + 3));
+        }
+      }
+    }
+  }
+
+  return [...new Set(result)]; // 去重
 }
 
 function loadVisualStyle(fingerprintId: string | undefined): string | null {
@@ -139,7 +162,7 @@ export async function POST(req: NextRequest) {
   const prompt = buildImageKeywordsPrompt(articleContent, slotCount, visualStyle);
   let raw: string;
   try {
-    raw = await streamClaude(prompt, { timeoutMs: 120_000 });
+    raw = await streamClaude(prompt, { timeoutMs: 120_000, model: 'sonnet' });
   } catch (err) {
     return jsonError(
       `模型那边没回来：${(err as Error).message}`,
@@ -153,6 +176,9 @@ export async function POST(req: NextRequest) {
   try {
     parsed = JSON.parse(cleaned) as ParsedKeywords;
   } catch (err) {
+    console.error('[auto] JSON parse failed. Raw output:', raw.slice(0, 500));
+    console.error('[auto] Cleaned output:', cleaned.slice(0, 500));
+    console.error('[auto] Parse error:', (err as Error).message);
     return jsonError(
       '模型这次输出不是合法 JSON，再点一次自动配图大概率就好',
       502,
@@ -181,9 +207,12 @@ export async function POST(req: NextRequest) {
     const candidates: SlotCandidate[] = [];
 
     if (sources.has('local')) {
-      const kw = [...tokenize(intentZh), ...tokenize(intentEn)];
+      // 优先使用中文关键词搜索本地资源（本地标签主要是中文）
+      const kw = [...tokenize(intentZh)];
       if (visualStyle) kw.push(...tokenize(visualStyle));
+      console.log(`[auto] slot ${s.slot_index}: intentZh="${intentZh}", intentEn="${intentEn}", keywords=`, kw);
       const local = searchLocalAssets(kw, 3);
+      console.log(`[auto] slot ${s.slot_index}: found ${local.length} local assets`);
       for (const a of local) candidates.push(localToCandidate(a));
     }
 
@@ -192,7 +221,7 @@ export async function POST(req: NextRequest) {
       const need = 3 - candidates.length;
       const q = [intentEn, visualStyle].filter(Boolean).join(' ');
       const photos = await searchUnsplash(q || intentZh, Math.max(need, 3));
-      for (const p of photos.slice(0, need + 1)) candidates.push(unsplashToCandidate(p));
+      for (const p of photos.slice(0, need)) candidates.push(unsplashToCandidate(p));
     }
 
     results.push({

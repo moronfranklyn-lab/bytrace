@@ -1,11 +1,11 @@
 #!/usr/bin/env tsx
 /**
- * One-shot scanner — walks 楠's local image library and bulk-inserts into
+ * One-shot scanner — walks Ethan's local image library and bulk-inserts into
  * the `local_assets` table. Idempotent: re-running only adds new files.
  *
  *   npx tsx scripts/scan-local-assets.ts [optional/path]
  *
- * Defaults to /Users/nan/ai资料合集/项目合集/公众号/公众号配图/
+ * Defaults to /Users/mixingtumima0000/资料合集/项目合集/公众号/公众号配图/
  */
 
 import { scanDirectory, DEFAULT_LOCAL_ASSETS_ROOT } from '../lib/images/scanner';

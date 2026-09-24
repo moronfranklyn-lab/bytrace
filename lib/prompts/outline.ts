@@ -1,6 +1,7 @@
 import type { Composition, FingerprintMeta } from '@/lib/composition';
 import { buildCompositionSystemSnippet, buildPlatformAwareSnippet } from '@/lib/composition';
 import { getPlatform, pickV3PlatformFingerprint, type PlatformKey } from '@/lib/platforms';
+import { XIAOPU_OUTLINE_RULES } from '@/lib/prompts/xiaopu-writing';
 
 export interface OutlineSection {
   index: number;
@@ -76,8 +77,9 @@ ${platformExtra ? `\n# 博主对目标平台的适配提示\n\n${platformExtra}\
   const structureBlock = buildStructureCapabilityBlock(fingerprints, composition);
   const materialBlock = buildResearchMaterialBlock(researchMaterial);
 
-  return `你是写作助理。任务是为一篇尚未动笔的文章生成"先框架后填肉"的大纲。这份大纲**最关键的不是 bullet 列表，是一根能让正文层层递进的论证骨架**。
+  return `你是小普的作者型共创伙伴。任务是为一篇尚未动笔的文章生成"先框架后填肉"的大纲。这份大纲**最关键的不是 bullet 列表，是一根能让正文层层递进的论证骨架**。
 
+${XIAOPU_OUTLINE_RULES}
 # 选定的风格组合
 
 ${compositionSnippet}
@@ -90,7 +92,7 @@ ${(idea ?? '').trim()}
 
 # 任务要求（按顺序做）
 
-1. 通读题材思路，提炼出**一句话**的核心论点（写进 core_thesis）。整篇围绕这一句挖。
+1. 通读题材思路，先内部建立 tension / common_view / mechanism / thesis / novelty / boundary / reader_consequence，再提炼出**一句话**的核心论点（写进 core_thesis）。整篇围绕这一句挖。
 2. **选定 structure_shape**：综合上方「站点偏好结构」+「博主擅长结构」选一个最合适的——
    - **causal_chain**（因果链）：现象 → 不是 A 是 B → 根源 C → 应对 D。适合"挖根"题材。
    - **dual_contrast**（双线对比）："你以为 X / 实际是 Y" 反复缠绕。适合反认知题材。
@@ -106,6 +108,7 @@ ${(idea ?? '').trim()}
    - 偶尔可以放一个 depth_role = "parallel"（同层换角度补充）或 "turn"（反转）。
    - 最后一节 depth_role = "close"：把 core_thesis 提到最高层或落地到读者。
    - **禁止整篇全是 "parallel"** —— 那叫平铺列举，看完读者只觉得"作者罗列了好几个角度"，没有思考的纵深。
+   - 每一节必须沿同一条 reader_question_chain 推进，并新增 understand / decide / act / verify 之一的读者收益。
 5. 每章节给出：
    - title：小标题 10-18 字，宋体感，禁止疑问句堆叠。
    - thesis：本节**核心论断**（一句话，≤ 30 字）。下节的首段会回扣这句继续挖。
@@ -149,6 +152,7 @@ JSON Schema：
 - 标题里禁止出现长破折号外的奇怪符号。
 - bullets 每条都是字符串，禁止嵌套对象。
 - **禁止**所有 depth_role 都是 "parallel" —— 必须至少有一节 "deeper"。
+- 禁止把观点写成口号；core_thesis 必须能被证据支持或推翻，且带边界。
 ${researchMaterial && researchMaterial.trim() ? `- **禁止凭空编造数字 / 引述 / 案例**——上方"素材包"里没有的硬事实，bullets 里禁止写出来；如果某节确实需要素材包里没有的事实，宁可写"这里需要补一个 X 类的具体例子"也别瞎填。\n` : ''}
 现在请输出 JSON。`;
 }

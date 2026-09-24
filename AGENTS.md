@@ -1,6 +1,6 @@
 # AutoArticle · 项目构造记录
 
-> 写给下一个 Codex 看。也写给楠几周后回来看。
+> 写给下一个 Codex 看。也写给Ethan几周后回来看。
 > 最后更新：2026-05-27（v3.3 收尾 · 多平台 N 个版本 + 配图自动接入 + 列表页快捷删除 + v3.3 端到端验证通过）
 > 历史里程碑：
 >   2026-05-25 · v3.1 自动分类 + OpenCLI 接入 + 反爬约束 v2
@@ -12,7 +12,7 @@
 
 本地 Next.js Web 应用。用户给一段思路（题材 + 角度 + 核心观点）+ 选一个博主风格指纹（或挑一份风格配方）+ 选一份站点画像 → 流式生成有深度、有论证骨架的成品文。
 
-**关键约束（违反会被楠纠正）**：
+**关键约束（违反会被Ethan纠正）**：
 
 - ✅ 走本机 Codex CLI（child_process）—— **不接 Anthropic API、不带 key、不联网调 LLM**
 - ✅ Codex CLI 必须用 `--output-format stream-json --include-partial-messages` 才会真流式。**别再用裸 `Codex -p`**，会等整篇生成完才一次性返回（100+ 秒静默）
@@ -55,7 +55,7 @@
    - 复用现有 `DELETE /api/fingerprint/v3/[id]` 级联删 5 张表，**不动 API**
 
 5. **多平台一次出 N 个版本**（task 4，最大一件）
-   - **关键决策**（楠拍板）：
+   - **关键决策**（Ethan拍板）：
      - N 平台勾选入口在 Step 1（路径 A）：主卡保留单选作为"主平台 + 主画像"，主卡下加 chip 多选行；主平台默认勾且不可取消；非主平台走 generic **不挑站点画像**
      - outline **完全共享**（路径 a）：按主平台生成一份，draft 时各平台 article prompt 自行压缩 / 扩张
      - 服务端**串行**而非并发（决策 5）：本机 Codex 是 Pro 订阅，并发会撞限速
@@ -84,7 +84,7 @@
 - 🟡 **v3.3 视觉对比仍未做**（AGENTS.md 第 360 行）：用同一题材 + v3.3 升级后的指纹生成一篇，跟之前那篇"KPI 是合同"对比纵深 / 物件类比 / 结构差异
 
 ### Agent 协作的几条经验
-- **agent 改文件被沙箱拒了 Edit 权限**——主线程直接接手是最快路径，但消耗主上下文。如果主上下文充裕、改动面小，接手；否则重派 agent 让楠在权限窗口点允许
+- **agent 改文件被沙箱拒了 Edit 权限**——主线程直接接手是最快路径，但消耗主上下文。如果主上下文充裕、改动面小，接手；否则重派 agent 让Ethan在权限窗口点允许
 - **agent prompt 里要写"遇到不确定停下来问，别瞎拍板"**——agent D 就是这样发现 Step 1 单选这个前置 gap 的，5 个决策一次性回报，节省了瞎做被推倒重来的时间
 - **SendMessage 工具在当前环境没有**——无法续 agent 上下文，只能新派一个 agent 并把所有调查结果 + 决策一次性塞进 prompt（self-contained）
 - **指纹三字段写在顶层** 这种事实，agent prompt 里错指位置的话 agent 也会跟着错——AGENTS.md 已是 truth-of-source，prompt 里别复述位置而是让 agent 自己读
@@ -362,14 +362,14 @@ lib/crawler/
 ## 关键决策的「为什么」（避免重蹈覆辙）
 
 ### 1. 为什么不接 Anthropic API，走本机 Codex CLI？
-楠没付 API key 钱，但订阅了 Codex Pro。`Codex -p "<prompt>"` 通过本机订阅算费用。代价：要 spawn 子进程 + 流式接 stdout + 180s 超时管理。代码在 [lib/Codex.ts](lib/Codex.ts)。  
-**不要换成 @anthropic-ai/sdk**——会变成 SaaS 模式且让楠付双份钱。
+Ethan没付 API key 钱，但订阅了 Codex Pro。`Codex -p "<prompt>"` 通过本机订阅算费用。代价：要 spawn 子进程 + 流式接 stdout + 180s 超时管理。代码在 [lib/Codex.ts](lib/Codex.ts)。  
+**不要换成 @anthropic-ai/sdk**——会变成 SaaS 模式且让Ethan付双份钱。
 
 ### 2. 为什么公众号默认不爬？
 公众号反爬极强，普通 fetch 触发 captcha。**已知唯一可用方案是 Apify 的 sian.agency/wechat-official-accounts-scraper，但单篇 $0.53**（FREE 用户 $0.14 startup + $0.39/item）。所以默认 [lib/crawler/wechat.ts](lib/crawler/wechat.ts) 走 Apify（如果有 token），否则返回 wechatRejection（"请粘贴正文"）。
 
 ### 3. 为什么 Apify B 站换成 zhorex？
-2026-05-24 楠拆解时被扣 $4.91/$5。复盘发现 sian.agency 系列对 FREE 用户收 $0.14 startup + $0.09-0.39/item，单 run $0.23-0.53。**zhorex/bilibili-scraper 只 $0.005/item 且无 startup**——便宜 50×。  
+2026-05-24 Ethan拆解时被扣 $4.91/$5。复盘发现 sian.agency 系列对 FREE 用户收 $0.14 startup + $0.09-0.39/item，单 run $0.23-0.53。**zhorex/bilibili-scraper 只 $0.005/item 且无 startup**——便宜 50×。  
 **保留 sian.agency** 在知乎和公众号——因为这两个**市面上找不到便宜替代**（搜遍 Apify Store + Bright Data/FireCrawl/Browserbase/Scrapfly 都没有中文 ready-made scraper）。
 
 ### 4. 为什么不接 FireCrawl / Browserbase / Bright Data？
@@ -383,7 +383,7 @@ lib/crawler/
 本地工具，单用户，零运维。better-sqlite3 同步 API 速度极快。**不要换 Postgres**。
 
 ### 6. 为什么不用 Ant Design / MUI？
-楠要"克制 + 书卷气"，用 Tailwind 手写组件 + CSS variables 做三主题切换（B/C/D）。**不要引 UI 库**。
+Ethan要"克制 + 书卷气"，用 Tailwind 手写组件 + CSS variables 做三主题切换（B/C/D）。**不要引 UI 库**。
 
 ### 7. 为什么有 v1 / v2 / v3 三套指纹拆解？
 迭代痕迹：
@@ -397,21 +397,21 @@ UI 默认走 v3。v1/v2 的代码不要删——老指纹用 `version_schema` �
 `lib/crawler/apify.ts:getApifyToken()` 先看 DB 再看 env。**DB 优先**让用户能在 UI 上即改即生效。env 是部署 / fallback 兜底。
 
 ### 9. 主题切换为什么不能贴边？
-楠的明确审美：主题切换器**必须收在导航栏下拉里**，不能在右下角悬浮。[components/theme/ThemeSwitcher.tsx](components/theme/ThemeSwitcher.tsx) 已挂在 HomeNav 里。
+Ethan的明确审美：主题切换器**必须收在导航栏下拉里**，不能在右下角悬浮。[components/theme/ThemeSwitcher.tsx](components/theme/ThemeSwitcher.tsx) 已挂在 HomeNav 里。
 
 ### 10. 为什么所有的运行时是 nodejs 不是 edge？
 better-sqlite3 是原生模块，跑不了 edge runtime。**每个 route.ts 顶部都要写 `export const runtime = 'nodejs'`**。
 
 ### 11. 为什么 streamClaude 要用 stream-json 而不是裸 `Codex -p`？
-楠在 Step 6 流式正文页看到"已 0 字"等了 100+ 秒——根因是 `Codex -p` 默认**不流式**，整篇答完才一口气吐 stdout。换成 `--output-format stream-json --input-format stream-json --include-partial-messages` 后，**5-6 秒就有第一个 chunk**，按 `content_block_delta > text_delta.text` 解析喂给 onChunk。  
+Ethan在 Step 6 流式正文页看到"已 0 字"等了 100+ 秒——根因是 `Codex -p` 默认**不流式**，整篇答完才一口气吐 stdout。换成 `--output-format stream-json --input-format stream-json --include-partial-messages` 后，**5-6 秒就有第一个 chunk**，按 `content_block_delta > text_delta.text` 解析喂给 onChunk。  
 对外契约不变（onChunk 仍是 plain text，返回值是 assembled text），所有调用方零迁移。代码在 [lib/Codex.ts](lib/Codex.ts)。
 
 ### 12. 为什么 v3 指纹要有 Stage 0 自动分类 + 类别细分？
-楠观察："一些博主会对热点追踪，可能写科技 / 经济 / 知识等多种类，希望能针对性抓取策略，又能跨博主综合分析"。  
+Ethan观察："一些博主会对热点追踪，可能写科技 / 经济 / 知识等多种类，希望能针对性抓取策略，又能跨博主综合分析"。  
 解法：8 个固定类别白名单（**不让模型自由分类**，避免"AI技术 / 人工智能 / 科技前沿"碎片化），单类 ≥ 3 篇时生成 `fingerprint_category_profiles` 专属配方，整库进 `strategy_fragments_indexed` 跨博主索引。写作时按类别筛碎片，比按博主筛精准。
 
 ### 13. 为什么 v3.3 要加 structure_repertoire / depth_pattern / analogy_bank？
-楠观察："工具产出文章总是浮于表面，用词非常抽象，有趣是有趣但是会让人审美疲劳"。  
+Ethan观察："工具产出文章总是浮于表面，用词非常抽象，有趣是有趣但是会让人审美疲劳"。  
 对比半佛仙人发现：模型抓到了**形式特征**（短句独段 / 数字分节 / 反差幽默），但漏了**内容特征**——
 - **论证形态**：半佛是因果链层层挖根（"苹果降价→不是讲良心→是商业策略→策略来自担忧→担忧是失去定义权→若失去会变诺基亚"），工具是平铺列举（"努力是常数 / KPI 是合同 / 内卷是贬值 / 时间不是资产"，5 个独立论点不咬合）
 - **物件类比**：半佛用"户口本进 iCloud / 黄牛在天台抽烟 / 中年人体检报告"，工具用"过路费 / 入场券 / 牌桌"（抽象隐喻）
@@ -432,7 +432,7 @@ v3.3 升级 prompt 后，老 v3 指纹的 fingerprint_json 没有 structure_repe
 ## 未完成事项 / 已知坑
 
 ### Apify 相关
-- ⚠️ **本月额度已 $4.91/$5**，6 月 1 号才重置。继续测试**需要楠充值**或等月底
+- ⚠️ **本月额度已 $4.91/$5**，6 月 1 号才重置。继续测试**需要Ethan充值**或等月底
 - ⚠️ env 里 `APIFY_TOKEN` 已注释（[autoarticle/.env.local](.env.local)）——重启用需 uncomment 或在 [/settings/preferences](http://localhost:3100/settings/preferences) 重填
 - 🟡 `lib/crawler/apify.ts` 里 `fetchBilibiliCaption` 是 **deprecated stub** 直接返 null。新的 zhorex actor 在 video_detail mode 同时返字幕，不再需要单独调
 - 🟡 `estimateActorCost` 是"sync 接口 usageTotalUsd=0 时的预估"——真实 cost 会在 status pill 60s 轮询时显示准确值
@@ -542,9 +542,9 @@ gh repo create autoarticle --private --source=. --push
 ## 给下次的你
 
 1. **改之前先读这个文档 + 跑 `git log --oneline -20`** 看最近改了啥
-2. **多 agent 并行做独立任务**是楠确认过的偏好——不要等楠让你才并行
+2. **多 agent 并行做独立任务**是Ethan确认过的偏好——不要等Ethan让你才并行
 3. **决策点用 AskUserQuestion 摆卡片**，不要在 chat 里列编号问题
-4. **称呼楠**——每条消息开头叫"楠"
+4. **称呼Ethan**——每条消息开头叫"Ethan"
 5. **写代码前先想 cost**——Apify 烧钱过历史，加 Apify 调用前要算 per-run 成本；加 Codex 调用前要估时间和配额（单 stage2 重跑 ~5-8 分钟）
 6. **改 schema 用 ALTER 幂等**——不要碰 schema.sql 顶层
 7. **STATUS-*.md 是旧 agent 的工作记录**——读不读看时间够不够，不必每次都翻

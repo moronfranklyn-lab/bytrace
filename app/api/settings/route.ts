@@ -13,13 +13,11 @@ export const dynamic = 'force-dynamic';
  * 当前只接受白名单内的 key（default_theme），其他一律 400。
  */
 
-const ALLOWED_KEYS = new Set(['default_theme', 'apify_token']);
+const ALLOWED_KEYS = new Set(['default_theme']);
 
 // 每个 key 自带值校验，防止前端误传。
 const VALUE_VALIDATORS: Record<string, (v: string) => boolean> = {
   default_theme: (v) => ['B', 'C', 'D'].includes(v),
-  // Apify token 形如 apify_api_xxxxxxxxxxxxxxxxxxxxxxxxxxx；空字符串视为清除
-  apify_token: (v) => v === '' || /^apify_api_[A-Za-z0-9]{20,}$/.test(v),
 };
 
 export async function GET() {
@@ -43,7 +41,6 @@ export async function PATCH(req: NextRequest) {
   }
 
   const key = typeof body.key === 'string' ? body.key.trim() : '';
-  // value 允许是空字符串（用于清除某个设置，例如禁用 Apify 时清空 token）
   const value = typeof body.value === 'string' ? body.value.trim() : '';
 
   if (!key) {

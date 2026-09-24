@@ -1032,11 +1032,12 @@ body {
 }
 
 .warm-error {
-  background: color-mix(in srgb, var(--error) 8%, var(--surface));
-  border: 1px solid color-mix(in srgb, var(--error) 35%, transparent);
+  background: var(--surface-light);
+  border: 1px solid var(--border);
+  border-left: 3px solid color-mix(in srgb, var(--error) 45%, var(--text-tertiary));
   border-radius: 12px;
-  padding: 20px 24px;
-  display: flex; flex-direction: column; gap: 10px;
+  padding: 18px 22px;
+  display: flex; flex-direction: column; gap: 8px;
   margin-top: 16px;
 }
 .warm-error-title {
@@ -1268,6 +1269,57 @@ body {
   font-family: var(--font-mono);
   font-size: 12px;
 }
+.add-samples-progress {
+  margin-top: 14px;
+  padding: 14px 16px;
+  background: var(--surface-white);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-secondary);
+}
+.add-samples-progress-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+.add-samples-progress-top strong {
+  color: var(--text);
+  font-weight: 600;
+}
+.add-samples-progress-top span {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.add-samples-progress-track {
+  height: 8px;
+  overflow: hidden;
+  background: var(--surface-light);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.add-samples-progress-bar {
+  height: 100%;
+  min-width: 18px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--text), var(--text-secondary), var(--text));
+  background-size: 180% 100%;
+  transition: width 0.5s ease;
+  animation: addSamplesProgressShimmer 1.4s linear infinite;
+}
+.add-samples-progress p {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+@keyframes addSamplesProgressShimmer {
+  from { background-position: 0% 0; }
+  to { background-position: 180% 0; }
+}
 .add-samples-feedback {
   margin-top: 16px;
   padding: 12px 16px;
@@ -1307,6 +1359,40 @@ body {
   font-size: 12px; color: var(--text);
   cursor: pointer; text-decoration: underline;
   font-family: inherit;
+}
+.site-delete-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+}
+.site-delete-btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--surface-white);
+  color: var(--text-tertiary);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.site-delete-btn:hover {
+  color: var(--error, #b34d4d);
+  border-color: var(--error, #b34d4d);
+}
+.site-delete-btn.confirming {
+  color: #fff;
+  background: var(--error, #b34d4d);
+  border-color: var(--error, #b34d4d);
+}
+.site-delete-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.site-delete-error {
+  color: var(--error, #b34d4d);
+  font-size: 11px;
 }
 
 /* 折叠 JSON */

@@ -28,6 +28,12 @@ import { buildCategoryProfilePrompt } from '@/lib/prompts/fingerprint-v3-categor
 export const MIN_ARTICLES = 2;
 export const MAX_ARTICLES = 20;
 export const MIN_CONTENT_CHARS = 80;
+/**
+ * 单篇样本正文上限。stage1 模板会把全文原样拼入 prompt（不做摘要），
+ * 遇到超长万字文会把 prompt 撑爆、拖到超时。风格特征在前 1.5 万字里
+ * 已经足够抓取，超出部分截断。
+ */
+export const MAX_SAMPLE_CONTENT_CHARS = 15000;
 export const STAGE1_CONCURRENCY = 3;
 export const STAGE0_CONCURRENCY = 4;
 
@@ -103,14 +109,18 @@ export async function runCategoryProfiles(
   stage1Outputs: FingerprintV3Stage1Output[],
   signal: AbortSignal,
 ): Promise<CategoryProfile[]> {
-  // 按 primary_category 分组
+  // 按 primary_category 分组。stage1Outputs 可能被 filter 掉 null 而与 prepared
+  // 位置错位，用输出自带的 .index 建 Map 精确对齐，不能按数组下标取。
+  const outputByIndex = new Map<number, FingerprintV3Stage1Output>();
+  for (const o of stage1Outputs) outputByIndex.set(o.index, o);
   const groups = new Map<ArticleCategory, FingerprintV3Stage1Output[]>();
   for (let i = 0; i < prepared.length; i++) {
     const cat = prepared[i].primary_category;
     if (!cat) continue;
-    if (i >= stage1Outputs.length) continue;
+    const out = outputByIndex.get(i);
+    if (!out) continue;
     const arr = groups.get(cat) ?? [];
-    arr.push(stage1Outputs[i]);
+    arr.push(out);
     groups.set(cat, arr);
   }
 
@@ -140,13 +150,71 @@ export async function runCategoryProfiles(
 
 export function stripJsonFence(raw: string): string {
   const fenceMatch = raw.match(/```json\s*([\s\S]*?)```/i);
-  if (fenceMatch) return fenceMatch[1].trim();
+  if (fenceMatch) {
+    const inner = fenceMatch[1].trim();
+    // fence 是懒匹配：字段值里再出现 ``` 会提前截断。先验证能 parse，
+    // 不行就放弃 fence 结果，回退到首尾大括号截取。
+    try {
+      JSON.parse(inner);
+      return inner;
+    } catch {/* 回退大括号截取 */}
+  }
   const firstBrace = raw.indexOf('{');
   const lastBrace = raw.lastIndexOf('}');
   if (firstBrace !== -1 && lastBrace > firstBrace) {
     return raw.slice(firstBrace, lastBrace + 1).trim();
   }
   return raw.trim();
+}
+
+/**
+ * stage2 输出解析 + 一次自动修复重试。
+ * 解析失败时把错误位置反馈给模型，让它**只输出修复后的合法 JSON**——
+ * 不重新跑整个 stage2，只修语法错。POST 首拆路由和 runV3Extraction 共用。
+ * 两次都失败抛 Error，调用方决定怎么报给前端。
+ */
+export async function parseStage2WithRepair(
+  stage2Raw: string,
+  signal: AbortSignal,
+): Promise<{ fingerprint: Record<string, unknown>; stage2Raw: string; stage2Cleaned: string }> {
+  const tryParse = (s: string): { ok: true; v: Record<string, unknown> } | { ok: false; err: Error } => {
+    try {
+      return { ok: true, v: JSON.parse(s) as Record<string, unknown> };
+    } catch (e) {
+      return { ok: false, err: e as Error };
+    }
+  };
+
+  let cleaned = stripJsonFence(stage2Raw);
+  const first = tryParse(cleaned);
+  if (first.ok) {
+    return { fingerprint: first.v, stage2Raw, stage2Cleaned: cleaned };
+  }
+
+  const errMsg = first.err.message;
+  const repairPrompt = `你刚才输出的 JSON 解析失败：${errMsg}
+
+下面是你输出的内容。请**只输出修复后的合法 JSON 代码块**（一个 \`\`\`json ... \`\`\` 围栏），前后不要任何文字、解释、寒暄。所有字段和结构不要改动，只修语法错误（漏逗号、多逗号、漏方括号 / 大括号、引号嵌套问题等）。
+
+\`\`\`
+${cleaned}
+\`\`\`
+
+现在请输出修复后的合法 JSON。`;
+  // 修复重试沿用 stage2 原始 480s：最需要 repair 的恰恰是 20 篇的大指纹，
+  // 模型要整段抄写一遍，360s 反而最容易在这里超时
+  const repaired = await streamClaude(repairPrompt, {
+    signal,
+    timeoutMs: 480_000,
+  });
+  cleaned = stripJsonFence(repaired);
+  const second = tryParse(cleaned);
+  if (!second.ok) {
+    throw new Error(
+      `stage2 输出格式两次都没修好。首次错误：${errMsg}；重试错误：${second.err.message}`,
+    );
+  }
+  return { fingerprint: second.v, stage2Raw: repaired, stage2Cleaned: cleaned };
 }
 
 export async function prepareSampleArticle(
@@ -176,12 +244,14 @@ export async function prepareSampleArticle(
         `第 ${idx + 1} 篇 URL 抓不下来（${crawled.reason}）：${crawled.message}。建议切到正文模式贴一下。`,
       );
     }
-    const content = crawled.content.trim();
+    let content = crawled.content.trim();
     if (content.length < MIN_CONTENT_CHARS) {
       throw new Error(
         `第 ${idx + 1} 篇抓到的正文太短（${content.length} 字），可能没抓全。切到正文模式手贴吧。`,
       );
     }
+    // 见 MAX_SAMPLE_CONTENT_CHARS 注释：超长正文截断，避免 stage1 prompt 爆体积
+    content = content.slice(0, MAX_SAMPLE_CONTENT_CHARS);
     return {
       title: crawled.title || input.title?.trim() || undefined,
       content,
@@ -197,10 +267,12 @@ export async function prepareSampleArticle(
     };
   }
 
-  const content = (input.content ?? '').trim();
+  let content = (input.content ?? '').trim();
   if (content.length < MIN_CONTENT_CHARS) {
     throw new Error(`第 ${idx + 1} 篇正文不足 ${MIN_CONTENT_CHARS} 字，再多贴一点`);
   }
+  // 见 MAX_SAMPLE_CONTENT_CHARS 注释：超长正文截断，避免 stage1 prompt 爆体积
+  content = content.slice(0, MAX_SAMPLE_CONTENT_CHARS);
   return {
     title: (input.title ?? '').trim() || undefined,
     content,
@@ -297,9 +369,11 @@ async function runStage1(
       if (idx >= prepared.length) return;
       progress?.onStage1Start?.(idx);
       const prompt = buildFingerprintV3Stage1Prompt(prepared[idx], idx, prepared.length);
+      // stage1 单篇拼全文，默认 180s 对长文不够，显式给 300s
       const raw = await streamClaude(prompt, {
         signal,
         onChunk: progress?.onStage1Chunk ? (text) => progress.onStage1Chunk!(idx, text) : undefined,
+        timeoutMs: 300_000,
       });
       const cleaned = stripJsonFence(raw);
       outputs[idx] = {
@@ -352,65 +426,27 @@ export async function runV3Extraction(
   const t2 = Date.now();
   const stage2Prompt = buildFingerprintV3Stage2Prompt(authorName, stage1Outputs);
   // Stage 2 是跨篇合成，prompt 体积随样本数线性涨；20 篇 ≈ 60-80k 字。给 480s
-  let stage2Raw = await streamClaude(stage2Prompt, {
+  const stage2FirstRaw = await streamClaude(stage2Prompt, {
     signal,
     onChunk: progress?.onStage2Chunk,
     timeoutMs: 480_000,
   });
-  let stage2Cleaned = stripJsonFence(stage2Raw);
-  let fingerprint: Record<string, unknown>;
-  const tryParse = (s: string): { ok: true; v: Record<string, unknown> } | { ok: false; err: Error } => {
-    try {
-      return { ok: true, v: JSON.parse(s) as Record<string, unknown> };
-    } catch (e) {
-      return { ok: false, err: e as Error };
-    }
-  };
-  const first = tryParse(stage2Cleaned);
-  if (first.ok) {
-    fingerprint = first.v;
-  } else {
-    // 一次自动修复重试：把错误位置反馈给模型，让它**只输出修复后的合法 JSON**。
-    // 不重新跑整个 stage2，只让模型修语法错。
-    const errMsg = first.err.message;
-    const repairPrompt = `你刚才输出的 JSON 解析失败：${errMsg}
-
-下面是你输出的内容。请**只输出修复后的合法 JSON 代码块**（一个 \`\`\`json ... \`\`\` 围栏），前后不要任何文字、解释、寒暄。所有字段和结构不要改动，只修语法错误（漏逗号、多逗号、漏方括号 / 大括号、引号嵌套问题等）。
-
-\`\`\`
-${stage2Cleaned}
-\`\`\`
-
-现在请输出修复后的合法 JSON。`;
-    const repaired = await streamClaude(repairPrompt, {
-      signal,
-      timeoutMs: 360_000,
-    });
-    stage2Raw = repaired;
-    stage2Cleaned = stripJsonFence(repaired);
-    const second = tryParse(stage2Cleaned);
-    if (!second.ok) {
-      throw new Error(
-        `stage2 输出格式两次都没修好。首次错误：${errMsg}；重试错误：${second.err.message}`,
-      );
-    }
-    fingerprint = second.v;
-  }
+  // 解析 + 一次自动修复重试（逻辑抽在 parseStage2WithRepair，POST 路由共用）
+  const stage2Parsed = await parseStage2WithRepair(stage2FirstRaw, signal);
+  const stage2Raw = stage2Parsed.stage2Raw;
+  const stage2Cleaned = stage2Parsed.stage2Cleaned;
+  const fingerprint = stage2Parsed.fingerprint;
   const stage2Ms = Date.now() - t2;
   progress?.onStageBoundary?.('stage2', 'done');
 
   const platformsAnalyzed = Array.from(new Set(prepared.map((p) => p.platform)));
 
-  // Stage 3（platforms_analyzed.length >= 2 才跑）
+  // Stage 3（多平台样本才跑）。触发条件以 prepared 的真实平台集合为准，
+  // 与 POST 路由一致——模型输出的 platforms_analyzed 可能漏报 / 幻报。
   let stage3Ms = 0;
   let stage3Used = false;
-  const platformsFromFp = Array.isArray(
-    (fingerprint as { platforms_analyzed?: unknown[] }).platforms_analyzed,
-  )
-    ? ((fingerprint as { platforms_analyzed: unknown[] }).platforms_analyzed as string[])
-    : platformsAnalyzed;
 
-  if (platformsFromFp.length >= 2) {
+  if (platformsAnalyzed.length >= 2) {
     progress?.onStageBoundary?.('stage3', 'start');
     const t3 = Date.now();
     try {

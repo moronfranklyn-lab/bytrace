@@ -5,7 +5,8 @@ import { ensureComposeColumns } from '@/lib/compose-schema';
 import { streamClaude } from '@/lib/claude';
 import { stripMarkdownFence } from '@/lib/sse';
 import { buildDiffPrompt } from '@/lib/prompts/diff';
-import { isValidPlatformKey, type PlatformKey } from '@/lib/platforms';
+import { isValidPlatformKey, resolvePlatformKey, type PlatformKey } from '@/lib/platforms';
+import { parseRefineVersions, type RefineVersionEntry } from '@/lib/refine-versions';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -28,13 +29,6 @@ interface DiffSummary {
   adjustments: string[];
 }
 
-interface RefineVersionEntry {
-  ts: number;
-  source_platform: string;
-  target_platform: string;
-  content_md: string;
-}
-
 function hashMd(s: string): string {
   return createHash('sha1').update(s).digest('hex').slice(0, 16);
 }
@@ -46,11 +40,12 @@ function resolvePlatformContent(
   target: PlatformKey,
 ): string | null {
   // 目标平台 = 文章本身的 platform_target → 返回主正文
-  if (basePlatform === target) return baseContentMd;
+  // resolvePlatformKey 兼容老数据里存中文名的情况（'公众号' vs 'wechat'）
+  if (resolvePlatformKey(basePlatform) === target) return baseContentMd;
 
   // 否则在 refine_versions_json 里找最新的 target_platform === target
   const matched = refineVersions
-    .filter((v) => v.target_platform === target && v.content_md)
+    .filter((v) => resolvePlatformKey(v.target_platform) === target && v.content_md)
     .sort((a, b) => b.ts - a.ts);
   return matched.length > 0 ? matched[0].content_md : null;
 }
@@ -92,7 +87,7 @@ export async function POST(
   const db = getDb();
   const row = db
     .prepare(
-      `SELECT id, content_md, platform_target, refine_versions_json
+      `SELECT id, content_md, platform_target, refine_versions_json, created_at
        FROM articles WHERE id = ?`,
     )
     .get(id) as
@@ -101,17 +96,16 @@ export async function POST(
         content_md: string | null;
         platform_target: string | null;
         refine_versions_json: string | null;
+        created_at: number;
       }
     | undefined;
   if (!row) return Response.json({ error: '这篇找不到' }, { status: 404 });
 
-  let refineVersions: RefineVersionEntry[] = [];
-  try {
-    if (row.refine_versions_json) {
-      const p = JSON.parse(row.refine_versions_json);
-      if (Array.isArray(p)) refineVersions = p as RefineVersionEntry[];
-    }
-  } catch {/* ignore */}
+  // 统一归一：兼容 draft route 写的 dict 形态和 refine route 写的 array 形态
+  const refineVersions: RefineVersionEntry[] = parseRefineVersions(
+    row.refine_versions_json,
+    { fallbackTs: row.created_at, mainPlatform: row.platform_target ?? undefined },
+  );
 
   const fromMd = resolvePlatformContent(row.content_md ?? '', row.platform_target, refineVersions, from as PlatformKey);
   const toMd = resolvePlatformContent(row.content_md ?? '', row.platform_target, refineVersions, to as PlatformKey);

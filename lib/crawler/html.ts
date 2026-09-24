@@ -16,7 +16,27 @@ export function extractTextFromContainer($: CheerioAPI, $container: Cheerio<Elem
   const blockSel =
     'p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, figcaption, td, .ztext-empty-paragraph';
 
-  $container.find(blockSel).each((_i, el) => {
+  // 先收全部命中节点，用于判断"祖先是否也命中了 blockSel"。
+  // 嵌套块级元素（li>p / blockquote>p / td>p 等）若不跳过会重复取文：
+  // 祖先取 text() 时已包含子块内容，子块再单独出一条就是两遍。
+  // 只认容器内的祖先（Set 里都是容器内节点），页面外层布局元素不会误伤。
+  const matchedEls = new Set<Element>();
+  const $blocks = $container.find(blockSel);
+  $blocks.each((_i, el) => {
+    matchedEls.add(el);
+  });
+  const hasMatchedAncestor = (el: Element): boolean => {
+    let node = el.parent;
+    while (node) {
+      if (matchedEls.has(node as Element)) return true;
+      node = node.parent;
+    }
+    return false;
+  };
+
+  $blocks.each((_i, el) => {
+    // 祖先块已经把这个节点的文本收进去了（含 pre 内部的节点），跳过防重复
+    if (hasMatchedAncestor(el)) return;
     const $el = $(el);
     // pre/code 块单独保留
     if (el.tagName === 'pre') {

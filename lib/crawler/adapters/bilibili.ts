@@ -22,7 +22,6 @@ import type {
 } from '../types';
 import { hashUrl } from '../dedupe';
 import { DESKTOP_UA } from '../http';
-import { isApifyEnabled, fetchBilibiliVideo } from '../apify';
 import {
   runOpenCliJson,
   OpenCliNotAvailable,
@@ -111,6 +110,32 @@ function extractBvid(url: URL): string | null {
   return m ? m[1] : null;
 }
 
+/**
+ * 展开 b23.tv 短链：跟随重定向拿最终 URL（got 的 res.url 是重定向后的地址）。
+ * 展开失败或最终还是 b23.tv（异常场景）返回 null，调用方保持 unsupported 提示。
+ */
+async function expandB23ShortLink(url: URL): Promise<URL | null> {
+  try {
+    const res = await got(url.toString(), {
+      headers: {
+        'User-Agent': DESKTOP_UA,
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      timeout: { request: 12_000 },
+      retry: { limit: 0 },
+      throwHttpErrors: false,
+      followRedirect: true,
+      maxRedirects: 5,
+    });
+    if (!res.url) return null;
+    const final = new URL(res.url);
+    if (/(^|\.)b23\.tv$/i.test(final.hostname)) return null;
+    return final;
+  } catch {
+    return null;
+  }
+}
+
 /** 从 URL 抽 UP 主 mid。 */
 function extractSpaceMid(url: URL): string | null {
   // host 形如 space.bilibili.com/<mid>
@@ -139,14 +164,23 @@ export const adapter: SiteAdapter = {
   },
 
   async crawlArticle(url: URL): Promise<CrawledArticle | CrawlError> {
-    const bvid = extractBvid(url);
+    let target = url;
+    let bvid = extractBvid(target);
+    // b23.tv 短链没有 /video/BV... 路径，先跟重定向展开成真实 URL 再走正常流程
+    if (!bvid && /(^|\.)b23\.tv$/i.test(url.hostname)) {
+      const expanded = await expandB23ShortLink(url);
+      if (expanded) {
+        target = expanded;
+        bvid = extractBvid(target);
+      }
+    }
     if (!bvid) {
       return {
         reason: 'unsupported',
         message: '这个 B 站链接不像视频页，找个 /video/BV... 的链接试试',
       };
     }
-    return crawlBilibiliVideo(bvid, url);
+    return crawlBilibiliVideo(bvid, target);
   },
 
   async crawlAuthorIndex(url: URL): Promise<CrawledAuthorIndex | CrawlError> {
@@ -166,54 +200,10 @@ async function crawlBilibiliVideo(
   bvid: string,
   url: URL,
 ): Promise<CrawledArticle | CrawlError> {
-  // Tier 1: OpenCLI bilibili video + subtitle（v2 反爬约束）
+  // OpenCLI bilibili video + subtitle（v2 反爬约束）
   // 元数据无需登录；字幕需要 Chrome 登录 B 站，没登录就只拿元数据
   const openCliResult = await crawlBilibiliViaOpenCli(bvid, url);
   if (openCliResult) return openCliResult;
-
-  // Tier 2: Apify zhorex/bilibili-scraper 兜底
-  if (isApifyEnabled()) {
-    const videoRes = await fetchBilibiliVideo(bvid);
-    if (videoRes) {
-      const v = videoRes.video;
-      const title = v.title || null;
-      const upName = v.ownerName || '';
-      const desc = (v.desc || '').trim();
-      const pic = v.pic ? normalizeBiliImage(v.pic) : '';
-      const faceUrl = v.ownerFace ? normalizeBiliImage(v.ownerFace) : '';
-
-      const subtitleText = videoRes.captionText || '';
-      const subtitleNote = subtitleText
-        ? ''
-        : '（此视频未提供字幕，仅含标题和简介）';
-
-      const content = composeArticleBody({
-        title,
-        upName,
-        desc,
-        subtitleText,
-        note: subtitleText ? undefined : subtitleNote,
-      });
-
-      const images: { url: string; alt: string | null }[] = [];
-      if (pic) images.push({ url: pic, alt: title });
-      if (faceUrl) images.push({ url: faceUrl, alt: upName || null });
-
-      return {
-        url: url.toString(),
-        url_hash: hashUrl(url.toString()),
-        title,
-        content,
-        images,
-        source: 'cheerio',
-        host: url.hostname,
-        apify_run_id: videoRes.runId,
-        apify_cost_usd: videoRes.costUsd,
-        apify_platform: 'bilibili',
-      };
-    }
-    // Apify 拿不到，落到原 B 站 API 流程兜底
-  }
 
   // 1) view 接口拿基础信息
   const viewUrl = `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`;

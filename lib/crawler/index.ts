@@ -201,8 +201,10 @@ export async function crawlAuthorIndex(
   const maxArticles = options.maxArticles ?? 20;
   const skipHashes = options.skipHashes ?? new Set<string>();
 
-  // Apify / 内部分页的 adapter 不再外层翻页
-  const skipPagination = adapter.id === 'xiaohongshu' || adapter.id === 'bilibili';
+  // Apify / 内部一次性 API 的 adapter 不再外层翻页
+  // youtube 的 crawlAuthorIndex 是一次性 Data API 返回，翻页只会白烧一轮配额
+  const skipPagination =
+    adapter.id === 'xiaohongshu' || adapter.id === 'bilibili' || adapter.id === 'youtube';
 
   const first = await adapter.crawlAuthorIndex(parsed);
   if ('reason' in first) return first;
@@ -228,11 +230,25 @@ export async function crawlAuthorIndex(
     }
     return added;
   };
+  // 返回前按"新 URL 计数到上限"截断：maxArticles 不只控制停止翻页，
+  // 也约束返回值——超额的新 URL 丢掉；skipHashes 里的旧 URL 不占配额、原样保留
+  const truncateToMax = (urls: string[]): string[] => {
+    const out: string[] = [];
+    let newCount = 0;
+    for (const u of urls) {
+      const isNew = !skipHashes.has(hashUrl(u));
+      if (isNew && newCount >= maxArticles) continue;
+      out.push(u);
+      if (isNew) newCount++;
+    }
+    return out;
+  };
+
   addAll(first.article_urls);
   let lastPageUrl = url;
 
   if (skipPagination || countNew() >= maxArticles) {
-    return { ...first, article_urls: collectedAll };
+    return { ...first, article_urls: truncateToMax(collectedAll) };
   }
 
   for (let page = 2; page <= maxPages; page++) {
@@ -263,6 +279,6 @@ export async function crawlAuthorIndex(
 
   return {
     ...first,
-    article_urls: collectedAll,
+    article_urls: truncateToMax(collectedAll),
   };
 }

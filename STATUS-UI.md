@@ -35,5 +35,5 @@
 ## 踩坑
 
 1. React 19 下 `JSX.Element` 全局命名空间不再默认导出，build 报 `Cannot find namespace 'JSX'`。改用 `import { type ReactElement } from 'react'`。
-2. Compose 页交互重 + 内部多个面板/平台/导出按钮需要共享 toast，整页 `'use client'`，子面板抽成轻量组件，符合楠的「整页 client」预期。
+2. Compose 页交互重 + 内部多个面板/平台/导出按钮需要共享 toast，整页 `'use client'`，子面板抽成轻量组件，符合Ethan的「整页 client」预期。
 3. 原型里两份 HTML 的 tag class 命名不一致（首页 `tag-lang`，compose 页 `tag.lang`），样式表里两套都写了，便于不改 markup 复用。

@@ -29,6 +29,7 @@ interface SampleRow {
   title: string | null;
   added_at: number;
   iteration: number;
+  publish_time: string | null;
 }
 
 interface SiteProfile {
@@ -81,7 +82,7 @@ export default async function SiteDetailPage({ params }: PageProps) {
 
   const samples = db
     .prepare(
-      `SELECT url, title, added_at, iteration FROM site_articles
+      `SELECT url, title, added_at, iteration, publish_time FROM site_articles
        WHERE site_id = ? ORDER BY added_at DESC`,
     )
     .all(id) as SampleRow[];
@@ -109,7 +110,7 @@ export default async function SiteDetailPage({ params }: PageProps) {
               )}
               <span>样本 {samples.length || row.source_article_count || '—'} 篇</span>
               <span className="meta-sep">·</span>
-              <span>建于 {formatDate(row.created_at)}</span>
+              <span>更新于 {formatDate(row.updated_at ?? row.created_at)}</span>
             </div>
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
@@ -236,6 +237,7 @@ export default async function SiteDetailPage({ params }: PageProps) {
             url: s.url,
             title: s.title,
             added_at_label: formatDate(s.added_at),
+            publish_time_label: s.publish_time,
             iteration: s.iteration,
           }))}
         />

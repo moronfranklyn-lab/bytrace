@@ -159,6 +159,13 @@ export function ArticleCard({ data, dateLabel }: Props) {
         <Link href={`/articles/${data.id}`} className="article-card-more">
           看全文 →
         </Link>
+        <Link
+          href={`/compose?article_id=${data.id}`}
+          className="btn btn-secondary"
+          style={{ marginLeft: 'auto', fontSize: 14, padding: '6px 14px' }}
+        >
+          预览导出
+        </Link>
       </footer>
     </article>
   );

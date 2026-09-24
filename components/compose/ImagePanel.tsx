@@ -69,6 +69,9 @@ export function ImagePanel({
 }: ImagePanelProps) {
   const [useLocal, setUseLocal] = useState(true);
   const [useUnsplash, setUseUnsplash] = useState(unsplashConfigured);
+  // unsplash 是否真的可用：初始值来自父组件（compose 页没传时恒 false），
+  // runAuto 响应里带真实的 unsplash_configured，拿到后更新，让 checkbox 与提示反映真实状态
+  const [unsplashReady, setUnsplashReady] = useState(unsplashConfigured);
   const [useCrawl, setUseCrawl] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -120,6 +123,10 @@ export function ImagePanel({
       }));
       setSlots(ss);
       setVisualStyle(data.visual_style ?? null);
+      // 用服务端返回的真实配置状态纠正"未配置"提示（父组件没传 prop 时全靠它）
+      if (typeof data.unsplash_configured === 'boolean') {
+        setUnsplashReady(data.unsplash_configured);
+      }
     } catch (err) {
       setError(`网络错了：${(err as Error).message}`);
     } finally {
@@ -159,6 +166,10 @@ export function ImagePanel({
     (n, s) => n + (s.candidates[s.selected_index]?.source === 'unsplash' ? 1 : 0),
     0,
   );
+  // 本地候选命中数（跨槽位去重）：接口不返回素材库总数，父组件也没传时，用它反映本地库的真实情况
+  const localCandidateCount = new Set(
+    slots.flatMap((s) => s.candidates.filter((c) => c.source === 'local').map((c) => c.id)),
+  ).size;
 
   return (
     <div>
@@ -197,10 +208,15 @@ export function ImagePanel({
         </span>
         <span className="img-status-text">
           {slots.length === 0 ? (
-            <>
-              还没配图 ·{' '}
-              <strong>{localAssetCount}</strong> 张本地素材已就绪
-            </>
+            localAssetCount > 0 ? (
+              <>
+                还没配图 ·{' '}
+                <strong>{localAssetCount}</strong> 张本地素材已就绪
+              </>
+            ) : (
+              // 父组件没传素材库数量时别显示"0 张已就绪"误导人
+              <>还没配图 · 点下面开始自动匹配</>
+            )
           ) : (
             <>
               已按{' '}
@@ -300,7 +316,11 @@ export function ImagePanel({
             />
             <div className="img-option-text">
               <strong>本地素材库</strong>
-              优先匹配 · {localAssetCount} 张已打标
+              {localAssetCount > 0
+                ? `优先匹配 · ${localAssetCount} 张已打标`
+                : slots.length > 0
+                  ? `优先匹配 · 本次命中 ${localCandidateCount} 张`
+                  : '优先匹配已打标素材'}
             </div>
           </label>
           <label className="img-option">
@@ -308,11 +328,11 @@ export function ImagePanel({
               type="checkbox"
               checked={useUnsplash}
               onChange={(e) => setUseUnsplash(e.target.checked)}
-              disabled={!unsplashConfigured}
+              disabled={!unsplashReady}
             />
             <div className="img-option-text">
               <strong>免费图库</strong>
-              {unsplashConfigured
+              {unsplashReady
                 ? 'Unsplash · 商用免费'
                 : '未配置 Unsplash key · 暂不可用'}
             </div>

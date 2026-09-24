@@ -19,6 +19,7 @@ import {
   type ArticleCategory,
 } from '@/lib/prompts/fingerprint-v3-stage0';
 import { buildCategoryProfilePrompt } from '@/lib/prompts/fingerprint-v3-category';
+import { parseStage2WithRepair } from '@/lib/fingerprints/v3-engine';
 import { pickAvatarChar } from '@/lib/authors/avatar';
 import { getDb } from '@/lib/db';
 
@@ -59,6 +60,9 @@ const MIN_ARTICLES = 2;
 const MAX_ARTICLES = 20;
 const MIN_CONTENT_CHARS = 80;
 const STAGE1_CONCURRENCY = 3;
+// 单篇样本正文上限：stage1 模板把全文原样拼入 prompt，超长万字文会撑爆
+// prompt 体积、拖到超时。风格特征在前 1.5 万字里已经足够抓取，超出截断。
+const MAX_SAMPLE_CONTENT_CHARS = 15000;
 
 function jsonError(message: string, status = 400) {
   return new Response(JSON.stringify({ error: message }), {
@@ -69,13 +73,28 @@ function jsonError(message: string, status = 400) {
 
 function stripJsonFence(raw: string): string {
   const fenceMatch = raw.match(/```json\s*([\s\S]*?)```/i);
-  if (fenceMatch) return fenceMatch[1].trim();
+  if (fenceMatch) {
+    const inner = fenceMatch[1].trim();
+    // fence 是懒匹配：字段值里再出现 ``` 会提前截断。先验证能 parse，
+    // 不行就放弃 fence 结果，回退到首尾大括号截取。
+    try {
+      JSON.parse(inner);
+      return inner;
+    } catch {/* 回退大括号截取 */}
+  }
   const firstBrace = raw.indexOf('{');
   const lastBrace = raw.lastIndexOf('}');
   if (firstBrace !== -1 && lastBrace > firstBrace) {
     return raw.slice(firstBrace, lastBrace + 1).trim();
   }
   return raw.trim();
+}
+
+// 样本去重哈希：URL 模式哈希 URL；paste 模式哈希正文前 200 字。
+// prepare 批内去重和落库 fingerprint_articles 共用同一口径。
+function sampleHash(p: { url?: string; content: string }): string {
+  if (p.url) return hashUrl(p.url);
+  return 'paste:' + createHash('sha1').update(p.content.slice(0, 200)).digest('hex').slice(0, 16);
 }
 
 interface PreparedArticle extends FingerprintV3Article {
@@ -112,12 +131,14 @@ async function prepareArticle(input: IncomingArticleInput, idx: number): Promise
         `第 ${idx + 1} 篇 URL 抓不下来（${crawled.reason}）：${crawled.message}。建议切到正文模式贴一下。`,
       );
     }
-    const content = crawled.content.trim();
+    let content = crawled.content.trim();
     if (content.length < MIN_CONTENT_CHARS) {
       throw new Error(
         `第 ${idx + 1} 篇抓到的正文太短（${content.length} 字），可能没抓全。切到正文模式手贴吧。`,
       );
     }
+    // 见 MAX_SAMPLE_CONTENT_CHARS 注释：超长正文截断，避免 stage1 prompt 爆体积
+    content = content.slice(0, MAX_SAMPLE_CONTENT_CHARS);
     return {
       title: crawled.title || input.title?.trim() || undefined,
       content,
@@ -133,12 +154,14 @@ async function prepareArticle(input: IncomingArticleInput, idx: number): Promise
   }
 
   // paste 模式
-  const content = (input.content ?? '').trim();
+  let content = (input.content ?? '').trim();
   if (content.length < MIN_CONTENT_CHARS) {
     throw new Error(
       `第 ${idx + 1} 篇正文不足 ${MIN_CONTENT_CHARS} 字，再多贴一点`,
     );
   }
+  // 见 MAX_SAMPLE_CONTENT_CHARS 注释：超长正文截断，避免 stage1 prompt 爆体积
+  content = content.slice(0, MAX_SAMPLE_CONTENT_CHARS);
   return {
     title: (input.title ?? '').trim() || undefined,
     content,
@@ -219,9 +242,11 @@ async function runStage1WithConcurrency(
       if (idx >= prepared.length) return;
       onItemStart(idx);
       const prompt = buildFingerprintV3Stage1Prompt(prepared[idx], idx, prepared.length);
+      // stage1 单篇拼全文，默认 180s 对长文不够，显式给 300s
       const raw = await streamClaude(prompt, {
         signal,
         onChunk: (text) => onChunk(idx, text),
+        timeoutMs: 300_000,
       });
       const cleaned = stripJsonFence(raw);
       outputs[idx] = {
@@ -291,6 +316,9 @@ export async function POST(req: NextRequest) {
         // ---- Step 1: 准备 ----
         send('stage', { stage: 'prepare', message: '正在准备样本' });
         const prepared: PreparedArticle[] = [];
+        // 批内去重：同一批里重复贴同一 URL / 同一段正文，只算一篇，
+        // 否则样本权重翻倍、article_count 也会虚记
+        const seenHashes = new Set<string>();
         for (let i = 0; i < articles.length; i++) {
           if (abortCtrl.signal.aborted) {
             send('error', { message: '已中止', phase: 'abort' });
@@ -299,6 +327,17 @@ export async function POST(req: NextRequest) {
           }
           try {
             const p = await prepareArticle(articles[i], i);
+            const h = sampleHash(p);
+            if (seenHashes.has(h)) {
+              send('article', {
+                index: i,
+                status: 'skipped-duplicate',
+                title: p.title || '（无标题）',
+                message: '这篇和本批前面的样本重复了，只算一篇',
+              });
+              continue;
+            }
+            seenHashes.add(h);
             prepared.push(p);
             send('article', {
               index: i,
@@ -318,6 +357,16 @@ export async function POST(req: NextRequest) {
             closeStream();
             return;
           }
+        }
+
+        // 去重可能把样本削到下限以下，提前拦住
+        if (prepared.length < MIN_ARTICLES) {
+          send('error', {
+            message: `去重后只剩 ${prepared.length} 篇有效样本，至少要 ${MIN_ARTICLES} 篇。换一篇不同的文章再来吧。`,
+            phase: 'prepare',
+          });
+          closeStream();
+          return;
         }
 
         const platformsAnalyzed = Array.from(
@@ -407,16 +456,21 @@ export async function POST(req: NextRequest) {
         }
         const stage2Ms = Date.now() - t2;
 
-        const stage2Cleaned = stripJsonFence(stage2Raw);
+        // 解析 + 一次自动修复重试（复用 engine 的 parseStage2WithRepair）：
+        // 20 篇跑了 8 分钟，不能因为模型漏个逗号整次作废
+        let stage2Cleaned: string;
         let fingerprint: Record<string, unknown>;
         try {
-          fingerprint = JSON.parse(stage2Cleaned);
+          const stage2Parsed = await parseStage2WithRepair(stage2Raw, abortCtrl.signal);
+          fingerprint = stage2Parsed.fingerprint;
+          stage2Raw = stage2Parsed.stage2Raw;
+          stage2Cleaned = stage2Parsed.stage2Cleaned;
         } catch (parseErr) {
           send('error', {
-            message: 'stage2 输出不是合法 JSON，再试一次大概率就好',
+            message: 'stage2 输出的 JSON 这次没修好，再试一次大概率就好',
             phase: 'parse-stage2',
             detail: (parseErr as Error).message,
-            sample: stage2Cleaned.slice(0, 280),
+            sample: stripJsonFence(stage2Raw).slice(0, 280),
           });
           closeStream();
           return;
@@ -478,13 +532,18 @@ export async function POST(req: NextRequest) {
         // 单类失败不影响其他类，全失败也不阻塞主流程。
         send('stage', { stage: 'category-profiles', message: '正在按类别细分指纹' });
         const t4 = Date.now();
+        // stage1Outputs 可能被 filter 掉 null 而与 prepared 位置错位，
+        // 用输出自带的 .index 建 Map 精确对齐，不能按数组下标取
+        const outputByIndex = new Map<number, FingerprintV3Stage1Output>();
+        for (const o of stage1Outputs) outputByIndex.set(o.index, o);
         const categoryGroups = new Map<ArticleCategory, typeof stage1Outputs>();
         for (let i = 0; i < prepared.length; i++) {
           const cat = prepared[i].primary_category;
           if (!cat) continue;
-          if (i >= stage1Outputs.length) continue;
+          const out = outputByIndex.get(i);
+          if (!out) continue;
           const arr = categoryGroups.get(cat) ?? [];
-          arr.push(stage1Outputs[i]);
+          arr.push(out);
           categoryGroups.set(cat, arr);
         }
         const categoryProfiles: Array<{
@@ -578,11 +637,6 @@ export async function POST(req: NextRequest) {
                created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           );
-          const sampleHash = (p: { url?: string; content: string }): string => {
-            if (p.url) return hashUrl(p.url);
-            return 'paste:' + createHash('sha1').update(p.content.slice(0, 200)).digest('hex').slice(0, 16);
-          };
-
           const sourceArticlesSummary = prepared.map((p) => ({
             title: p.title,
             platform: p.platform,

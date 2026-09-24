@@ -4,7 +4,8 @@ import { getDb } from '@/lib/db';
 import { ensureComposeColumns } from '@/lib/compose-schema';
 import { ArticleSearch } from './ArticleSearch';
 import { ArticleCard } from './ArticleCard';
-import { getPlatform, isValidPlatformKey, type PlatformKey } from '@/lib/platforms';
+import { getPlatform, resolvePlatformKey, type PlatformKey } from '@/lib/platforms';
+import { parseRefineVersions, type RefineVersionEntry } from '@/lib/refine-versions';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -23,13 +24,6 @@ interface ArticleRow {
   created_at: number;
   author_name: string | null;
   author_avatar: string | null;
-}
-
-interface RefineVersionEntry {
-  ts: number;
-  source_platform: string;
-  target_platform: string;
-  content_md: string;
 }
 
 export interface PlatformVersion {
@@ -84,27 +78,6 @@ function buildExcerpt(md: string): string {
   return stripped.slice(0, 140);
 }
 
-function resolvePlatformKey(raw: string | null | undefined): PlatformKey | null {
-  if (!raw) return null;
-  const k = raw.trim();
-  // 直接命中英文 key
-  if (isValidPlatformKey(k)) return k as PlatformKey;
-  // 兼容旧数据里可能存的中文名（少量历史记录）
-  const CN_TO_KEY: Record<string, PlatformKey> = {
-    '公众号': 'wechat',
-    '知乎': 'zhihu',
-    '少数派': 'sspai',
-    '优设': 'uisdc',
-    '小红书': 'xhs',
-    'B站': 'bilibili',
-    'B 站': 'bilibili',
-    '抖音': 'douyin',
-    'YouTube': 'youtube',
-    '自定义': 'custom',
-  };
-  return CN_TO_KEY[k] ?? null;
-}
-
 function buildCardData(row: ArticleRow): ArticleCardData | null {
   const primaryKey = resolvePlatformKey(row.platform_target);
   const baseMd = row.content_md ?? '';
@@ -115,13 +88,11 @@ function buildCardData(row: ArticleRow): ArticleCardData | null {
     byKey.set(primaryKey, { content_md: baseMd, ts: row.created_at });
   }
 
-  let refineVersions: RefineVersionEntry[] = [];
-  try {
-    if (row.refine_versions_json) {
-      const p = JSON.parse(row.refine_versions_json);
-      if (Array.isArray(p)) refineVersions = p as RefineVersionEntry[];
-    }
-  } catch {/* ignore */}
+  // 统一归一：兼容 draft route 写的 dict 形态和 refine route 写的 array 形态
+  const refineVersions: RefineVersionEntry[] = parseRefineVersions(
+    row.refine_versions_json,
+    { fallbackTs: row.created_at, mainPlatform: row.platform_target ?? undefined },
+  );
 
   for (const v of refineVersions) {
     const key = resolvePlatformKey(v.target_platform);

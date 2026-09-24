@@ -16,7 +16,6 @@ import got from 'got';
 import * as cheerio from 'cheerio';
 import { DESKTOP_UA } from '../crawler/http';
 import { isWechatHost } from '../crawler/wechat';
-import { isApifyEnabled } from '../crawler/apify';
 import type { AuthorCandidate, SearchError } from './types';
 
 export type { AuthorCandidate, SearchError } from './types';
@@ -94,6 +93,22 @@ const cache = new Map<string, { at: number; result: AuthorCandidate[] | SearchEr
 /** DuckDuckGo 抓完限速。 */
 const DDG_COOLDOWN_MS = 1500;
 let lastDdgCallAt = 0;
+// promise 链队列：并发搜索按排队序串行等冷却。
+// 不能只靠时间戳——并发时会同时读到旧时间戳后一起放行，冷却就失效了
+let ddgQueueTail: Promise<void> = Promise.resolve();
+
+function ddgThrottle(): Promise<void> {
+  const mine = ddgQueueTail.then(async () => {
+    const since = Date.now() - lastDdgCallAt;
+    if (since < DDG_COOLDOWN_MS) {
+      await sleep(DDG_COOLDOWN_MS - since);
+    }
+    lastDdgCallAt = Date.now();
+  });
+  // 链尾吞掉异常防止断链（防御性，等待逻辑本身不会抛）
+  ddgQueueTail = mine.catch(() => undefined);
+  return mine;
+}
 
 /**
  * 入口：按博主名搜，返回候选数组或错误对象。
@@ -178,12 +193,8 @@ function withSiteFilter(q: string): string {
 async function searchViaDuckDuckGo(
   query: string,
 ): Promise<AuthorCandidate[] | SearchError> {
-  // 冷却：和上次调用的间隔不到 1.5s 就 sleep 一下
-  const since = Date.now() - lastDdgCallAt;
-  if (since < DDG_COOLDOWN_MS) {
-    await sleep(DDG_COOLDOWN_MS - since);
-  }
-  lastDdgCallAt = Date.now();
+  // 冷却：和上次调用的间隔不到 1.5s 就排队等（promise 链保证并发也按序间隔）
+  await ddgThrottle();
 
   const q = withSiteFilter(query);
   const url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q);
@@ -433,22 +444,6 @@ function matchPlatform(
  */
 function assessRisk(url: URL, kind: 'article' | 'index' | 'unknown'): { risk: 'blocked' | 'limited' | null; hint: string | null } {
   const host = url.hostname.toLowerCase();
-  // Apify 接入开启时：知乎/B站/小红书/公众号都走 Apify，免去原本的风控问题
-  if (isApifyEnabled()) {
-    const apifyHint = '走 Apify 抓取，约 $0.005-0.02/篇';
-    if (/(^|\.)zhihu\.com$/.test(host)) {
-      return { risk: null, hint: apifyHint };
-    }
-    if (/(^|\.)bilibili\.com$/.test(host)) {
-      return { risk: null, hint: apifyHint };
-    }
-    if (/(^|\.)(xiaohongshu\.com|xhslink\.com)$/.test(host)) {
-      return { risk: null, hint: apifyHint };
-    }
-    if (isWechatHost(host)) {
-      return { risk: null, hint: apifyHint };
-    }
-  }
   // 知乎：2024 年中起全面反爬，cookie 缺失即 403
   if (/(^|\.)zhihu\.com$/.test(host)) {
     return { risk: 'blocked', hint: '知乎反爬较强，建议在浏览器登录后复制正文，工具切「正文模式」用' };

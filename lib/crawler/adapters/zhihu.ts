@@ -9,7 +9,6 @@ import { fetchHtml } from '../http';
 import { hashUrl } from '../dedupe';
 import { extractImagesFromContainer, extractTextFromContainer, findContainerBySelectors } from '../html';
 import { crawlGeneric } from './generic';
-import { isApifyEnabled, fetchZhihuArticle } from '../apify';
 import {
   runOpenCliJson,
   OpenCliNotAvailable,
@@ -49,28 +48,7 @@ export const adapter: SiteAdapter = {
       if (openCliResult) return openCliResult;
     }
 
-    // Tier 2: Apify（兜底）
-    const articleId = extractZhihuArticleId(url);
-    if (articleId && isApifyEnabled()) {
-      const r = await fetchZhihuArticle(articleId);
-      if (r) {
-        const urlStr = r.article.url || url.toString();
-        return {
-          url: urlStr,
-          url_hash: hashUrl(urlStr),
-          title: r.article.title || null,
-          content: r.article.content,
-          images: [],
-          source: 'cheerio',
-          host: url.hostname,
-          apify_run_id: r.runId,
-          apify_cost_usd: r.costUsd,
-          apify_platform: 'zhihu',
-        };
-      }
-      // Apify 拿不到，落到 cheerio 兜底
-    }
-
+    // Tier 2: cheerio 兜底
     const html = await fetchHtml(url.toString(), {
       Referer: 'https://www.zhihu.com/',
       'Sec-Fetch-Site': 'same-site',
@@ -164,6 +142,28 @@ export const adapter: SiteAdapter = {
 };
 
 /**
+ * 剥掉 OpenCLI 落盘 markdown 的头部：# 标题 / > 元数据行 / --- 分隔线。
+ * 只处理文件头部区域（前 20 行内连续的头部行）：标题前有别的行也能剥干净，
+ * 且正文里合法的 # 标题、> 引用、--- 水平线不受影响。（与 wechat.ts 同款逻辑）
+ */
+function stripOpenCliHeader(content: string): string {
+  const lines = content.split('\n');
+  let i = 0;
+  let titleSeen = false;
+  let sepSeen = false;
+  while (i < lines.length && i < 20) {
+    const line = lines[i];
+    if (/^\s*$/.test(line)) { i++; continue; }
+    if (sepSeen) break; // --- 之后就是正文
+    if (!titleSeen && /^# /.test(line)) { titleSeen = true; i++; continue; }
+    if (/^> /.test(line)) { i++; continue; }
+    if (/^---\s*$/.test(line)) { sepSeen = true; i++; continue; }
+    break;
+  }
+  return lines.slice(i).join('\n').trim();
+}
+
+/**
  * OpenCLI 知乎专栏文章通道（zhuanlan.zhihu.com/p/xxx）。
  * 失败返回 null，让上层走 Apify / cheerio 兜底。
  *
@@ -193,8 +193,8 @@ async function crawlZhihuViaOpenCli(url: URL): Promise<CrawledArticle | null> {
   const entry = result[0];
   if (!entry || entry.status !== 'success' || !entry.saved) return null;
 
-  const { readFile, unlink, rm } = await import('node:fs/promises');
-  const { resolve, dirname } = await import('node:path');
+  const { readFile, unlink } = await import('node:fs/promises');
+  const { resolve } = await import('node:path');
   const absPath = resolve(process.cwd(), entry.saved);
   let content: string;
   try {
@@ -204,16 +204,12 @@ async function crawlZhihuViaOpenCli(url: URL): Promise<CrawledArticle | null> {
   }
 
   // 清理 OpenCLI 留下的文件
+  // 只删本文件不删目录：目录可能按专栏/作者共享，并发抓两篇时删目录会互删对方文件
   try {
     await unlink(absPath).catch(() => undefined);
-    await rm(dirname(absPath), { recursive: true, force: true }).catch(() => undefined);
   } catch {/* ignore */}
 
-  const bodyOnly = content
-    .replace(/^# .+\n/, '')
-    .replace(/^> .+\n/gm, '')
-    .replace(/^---\s*\n/m, '')
-    .trim();
+  const bodyOnly = stripOpenCliHeader(content);
   if (bodyOnly.length < 80) return null;
 
   const imageRe = /!\[[^\]]*\]\(([^)]+)\)/g;

@@ -31,6 +31,7 @@ interface FingerprintRow {
   parent_id: string | null;
   article_count: number | null;
   created_at: number;
+  version_schema: string | null;
 }
 
 interface CrawledArticleRow {
@@ -131,7 +132,7 @@ export async function POST(req: NextRequest, { params }: Params) {
   const latestFp = db
     .prepare(
       `SELECT id, author_id, fingerprint_json, source_articles_json,
-              version, parent_id, article_count, created_at
+              version, parent_id, article_count, created_at, version_schema
        FROM fingerprints
        WHERE author_id = ?
        ORDER BY COALESCE(version, 1) DESC, created_at DESC
@@ -144,6 +145,22 @@ export async function POST(req: NextRequest, { params }: Params) {
       JSON.stringify({ error: '这位博主还没有指纹，先去完整拆解一次' }),
       {
         status: 400,
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      },
+    );
+  }
+
+  // v3 指纹不走这条老优化通道：这里用的是 v1 prompt，产出的新行 version_schema
+  // 会是 v1 且 version 更高成为 latest，等于把 v3 多平台指纹遮蔽降级
+  // （详情页四维度全空、compose 也读不到 platform_fingerprints_json）。
+  if (latestFp.version_schema === 'v3') {
+    return new Response(
+      JSON.stringify({
+        error:
+          '这位博主用的是 v3 指纹，这条老优化通道会把它降回 v1，就不往下走了。去指纹详情页用「加样本重提炼」，新样本会累计进 v3 指纹里，效果一样还不丢东西。',
+      }),
+      {
+        status: 409,
         headers: { 'Content-Type': 'application/json; charset=utf-8' },
       },
     );
@@ -253,11 +270,13 @@ export async function POST(req: NextRequest, { params }: Params) {
 
         let raw = '';
         try {
+          // refine prompt 带旧指纹全文 + 最多 10 篇新样本，默认 180s 不够
           raw = await streamClaude(prompt, {
             signal: abortCtrl.signal,
             onChunk: (text: string) => {
               send('chunk', { text });
             },
+            timeoutMs: 360_000,
           });
         } catch (err) {
           send('error', {

@@ -151,6 +151,9 @@ export async function DELETE(
   const db = getDb();
   try {
     const info = db.prepare(`DELETE FROM articles WHERE id = ?`).run(id);
+    // 顺手清掉关联表，避免留孤儿行（diff 缓存 / critic 评分记录）
+    db.prepare(`DELETE FROM article_diffs WHERE article_id = ?`).run(id);
+    db.prepare(`DELETE FROM critic_runs WHERE article_id = ?`).run(id);
     if (info.changes === 0) {
       return new Response(
         JSON.stringify({ ok: false, message: '这篇已经不在了' }),

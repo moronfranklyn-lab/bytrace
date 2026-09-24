@@ -28,8 +28,12 @@ export async function fetchHtml(
   extraHeaders?: Record<string, string>,
 ): Promise<string | CrawlError> {
   let res: Response<string>;
+  // 边下边控体积：超过 5MB 立即 abort，不等整页下完才检查
+  // （got 15 没有 downloadLimit 选项，用 signal + downloadProgress 事件实现）
+  const sizeController = new AbortController();
+  let tooLarge = false;
   try {
-    res = await got(url, {
+    const promise = got(url, {
       headers: defaultHeaders(extraHeaders),
       timeout: { request: 12_000 },
       followRedirect: true,
@@ -38,8 +42,19 @@ export async function fetchHtml(
       throwHttpErrors: false,
       // got 默认会自动解码；保险起见显式响应类型
       responseType: 'text',
+      signal: sizeController.signal,
     });
+    promise.on('downloadProgress', (p: { transferred: number }) => {
+      if (!tooLarge && p.transferred > MAX_HTML_BYTES) {
+        tooLarge = true;
+        sizeController.abort();
+      }
+    });
+    res = await promise;
   } catch (e) {
+    if (tooLarge) {
+      return { reason: 'parse-failed', message: '页面太大了（>5MB），不像文章页，先放着吧' };
+    }
     const msg = e instanceof Error ? e.message : String(e);
     if (/timeout/i.test(msg)) {
       return { reason: 'timeout', message: '这个链接我没爬动，等了 12 秒还没回应' };

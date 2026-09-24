@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { HomeNav } from '@/components/nav/HomeNav';
 import { getDb } from '@/lib/db';
+import { DeleteSiteButton } from './DeleteSiteButton';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -25,6 +26,7 @@ interface DisplaySite {
   url_pattern: string | null;
   source_article_count: number | null;
   created_at: number;
+  updated_at: number | null;
   preferred_topics: string[];
   word_count_range: [number, number] | null;
   tone: string | null;
@@ -81,6 +83,7 @@ function loadSites(): DisplaySite[] {
         url_pattern: row.url_pattern,
         source_article_count: displayCount,
         created_at: row.created_at,
+        updated_at: row.updated_at,
         preferred_topics: preferred,
         word_count_range: range,
         tone,
@@ -182,12 +185,10 @@ export default async function SitesPage() {
                   }}
                 >
                   {sectionList.map((s) => (
-                    <Link
+                    <div
                       key={s.id}
-                      href={`/sites/${s.id}`}
                       className="card-compact"
                       style={{
-                        textDecoration: 'none',
                         display: 'flex',
                         flexDirection: 'column',
                         gap: 8,
@@ -195,25 +196,33 @@ export default async function SitesPage() {
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
-                        <h3
-                          style={{
-                            fontFamily: 'var(--font-display)',
-                            fontSize: 16,
-                            fontWeight: 500,
-                            color: 'var(--text)',
-                            margin: 0,
-                          }}
+                        <Link
+                          href={`/sites/${s.id}`}
+                          style={{ textDecoration: 'none', color: 'inherit', minWidth: 0 }}
                         >
-                          {s.section || '主站'}
-                        </h3>
-                        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                          {formatDate(s.created_at)}
+                          <h3
+                            style={{
+                              fontFamily: 'var(--font-display)',
+                              fontSize: 16,
+                              fontWeight: 500,
+                              color: 'var(--text)',
+                              margin: 0,
+                            }}
+                          >
+                            {s.section || '主站'}
+                          </h3>
+                        </Link>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>
+                          更新 {formatDate(s.updated_at ?? s.created_at)}
                         </span>
                       </div>
                       {s.url_pattern && (
-                        <div style={{ fontSize: 12, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>
+                        <Link
+                          href={`/sites/${s.id}`}
+                          style={{ fontSize: 12, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', textDecoration: 'none' }}
+                        >
                           {s.url_pattern}
-                        </div>
+                        </Link>
                       )}
                       {s.preferred_topics.length > 0 && (
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
@@ -237,7 +246,13 @@ export default async function SitesPage() {
                           {s.tone.length > 60 ? s.tone.slice(0, 60) + '…' : s.tone}
                         </p>
                       )}
-                    </Link>
+                      <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                        <Link href={`/sites/${s.id}`} className="link-btn" style={{ fontSize: 12 }}>
+                          查看画像
+                        </Link>
+                        <DeleteSiteButton siteId={s.id} siteName={`${siteName} · ${s.section || '主站'}`} />
+                      </div>
+                    </div>
                   ))}
                 </div>
               </section>

@@ -18,10 +18,8 @@ export type CrawledArticle = {
    * 历史数据可能不带这个字段，消费方需用 `?? 'text'` 兜底。
    */
   medium?: 'text' | 'video' | 'mixed';
-  /** Apify 抓取专属：本次 run 的 ID 与计费（USD），用于前端 toast 展示 */
-  apify_run_id?: string;
-  apify_cost_usd?: number;
-  apify_platform?: string; // 'zhihu' | 'bilibili' | 'wechat' | 'xiaohongshu'
+  /** 原文发布时间 / 写作时间。适配器能抓到就填 ISO 或站点原始日期文本，UI 会展示。 */
+  publish_time?: string | null;
 };
 
 export type CrawlError = {

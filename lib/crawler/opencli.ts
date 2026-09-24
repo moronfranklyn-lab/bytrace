@@ -18,6 +18,7 @@ import { existsSync } from 'node:fs';
 const FALLBACK_PATHS = [
   '/usr/local/bin/opencli',
   '/opt/homebrew/bin/opencli',
+  process.env.HOME ? `${process.env.HOME}/.local/bin/opencli` : null, // 2026-07 机器重装后 CLI 的新家
   process.env.HOME ? `${process.env.HOME}/.npm-global/bin/opencli` : null,
 ].filter((p): p is string => !!p);
 
@@ -48,18 +49,27 @@ const RATE_LIMIT_MS: Record<string, number> = {
 };
 
 const lastCallTs: Map<string, number> = new Map();
+// 每个平台一条 promise 链队列：并发调用按排队序串行等待。
+// 不能只靠时间戳——并发时会同时读到旧时间戳后一起放行，平台强制间隔就失效了
+const throttleQueues: Map<string, Promise<void>> = new Map();
 
-async function throttle(platformKey: string): Promise<void> {
+function throttle(platformKey: string): Promise<void> {
   const minGap = RATE_LIMIT_MS[platformKey];
-  if (!minGap) return;
-  const last = lastCallTs.get(platformKey);
-  if (last !== undefined) {
-    const elapsed = Date.now() - last;
-    if (elapsed < minGap) {
-      await new Promise((r) => setTimeout(r, minGap - elapsed));
+  if (!minGap) return Promise.resolve();
+  const prev = throttleQueues.get(platformKey) ?? Promise.resolve();
+  const mine = prev.then(async () => {
+    const last = lastCallTs.get(platformKey);
+    if (last !== undefined) {
+      const elapsed = Date.now() - last;
+      if (elapsed < minGap) {
+        await new Promise((r) => setTimeout(r, minGap - elapsed));
+      }
     }
-  }
-  lastCallTs.set(platformKey, Date.now());
+    lastCallTs.set(platformKey, Date.now());
+  });
+  // 链尾吞掉异常，防止一次失败把整条队列打断（防御性，等待逻辑本身不会抛）
+  throttleQueues.set(platformKey, mine.catch(() => undefined));
+  return mine;
 }
 
 export interface OpenCliRawResult {
@@ -165,8 +175,14 @@ export async function runOpenCliJson<T = unknown>(
     proc.stdout?.on('data', (b: Buffer) => stdoutChunks.push(b));
     proc.stderr?.on('data', (b: Buffer) => stderrChunks.push(b));
 
+    let killTimer: NodeJS.Timeout | null = null;
     const timer = setTimeout(() => {
       try { proc.kill('SIGTERM'); } catch {/* ignore */}
+      // SIGTERM 后 5s 还没退出就补 SIGKILL，防止子进程吞信号一直挂着
+      killTimer = setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch {/* ignore */}
+      }, 5_000);
+      killTimer.unref?.();
       settle(() => reject(new OpenCliTimeout(timeoutMs)));
     }, timeoutMs);
 
@@ -178,6 +194,7 @@ export async function runOpenCliJson<T = unknown>(
 
     proc.on('error', (err: NodeJS.ErrnoException) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       signal?.removeEventListener('abort', onAbort);
       if (err.code === 'ENOENT') {
         settle(() => reject(new OpenCliNotAvailable(`spawn ENOENT: ${bin}`)));
@@ -188,6 +205,7 @@ export async function runOpenCliJson<T = unknown>(
 
     proc.on('close', (code) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       signal?.removeEventListener('abort', onAbort);
       const stdout = Buffer.concat(stdoutChunks).toString('utf-8');
       const stderr = Buffer.concat(stderrChunks).toString('utf-8');

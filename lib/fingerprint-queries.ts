@@ -61,9 +61,15 @@ export function listAllFingerprints(): FingerprintListItem[] {
 
 function toListItem(row: FingerprintRow): FingerprintListItem {
   let articleCount = 0;
+  let sourceUrls: string[] = [];
   try {
     const arr = JSON.parse(row.source_articles_json);
-    if (Array.isArray(arr)) articleCount = arr.length;
+    if (Array.isArray(arr)) {
+      articleCount = arr.length;
+      sourceUrls = arr
+        .map((x) => (x && typeof x === 'object' ? (x as { url?: unknown }).url : null))
+        .filter((x): x is string => typeof x === 'string');
+    }
   } catch {/* ignore */}
 
   // 雷达条目前没有真实的"维度得分"——基于指纹 JSON 长度做一个稳定可视化
@@ -74,7 +80,7 @@ function toListItem(row: FingerprintRow): FingerprintListItem {
   return {
     id: row.id,
     authorName: row.author_name,
-    platform: row.platform,
+    platform: displayPlatform(row.platform, sourceUrls),
     avatarChar: row.avatar_emoji || row.author_name.slice(0, 1).toUpperCase(),
     studied: articleCount,
     hitCount: row.hit_count,
@@ -188,7 +194,7 @@ export function listAuthorsAggregated(): AuthorListItem[] {
 
       const isV3 = !!fp.platform_fingerprints && typeof fp.platform_fingerprints === 'object';
 
-      const platforms = extractPlatforms(fp, r.platform);
+      const platforms = extractPlatforms(fp, r.platform, r.latest_fp_id);
       const fragmentCount = countFragments(fp);
 
       const lastTouchedAt = r.last_used_at ?? r.latest_fp_created ?? r.created_at;
@@ -209,21 +215,53 @@ export function listAuthorsAggregated(): AuthorListItem[] {
     });
 }
 
-function extractPlatforms(fp: Record<string, unknown>, fallback: string | null): string[] {
+function displayPlatform(raw: string | null, sourceUrls: string[] = []): string {
+  const hasWoshipm = sourceUrls.some((u) => /(^|\.)woshipm\.com\//i.test(u));
+  if (hasWoshipm) return '人人都是产品经理';
+  const v = raw?.trim();
+  if (!v) return '未指定';
+  const map: Record<string, string> = {
+    wechat: '公众号',
+    xhs: '小红书',
+    zhihu: '知乎',
+    sspai: '少数派',
+    uisdc: '优设',
+    bilibili: 'B 站',
+    youtube: 'YouTube',
+    douyin: '抖音',
+  };
+  return map[v] ?? v;
+}
+
+function sourceUrlsForFingerprint(fpId: string | null): string[] {
+  if (!fpId) return [];
+  try {
+    const db = getDb();
+    const rows = db
+      .prepare(`SELECT url FROM fingerprint_articles WHERE fingerprint_id = ? AND url IS NOT NULL`)
+      .all(fpId) as { url: string }[];
+    return rows.map((r) => r.url).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function extractPlatforms(fp: Record<string, unknown>, fallback: string | null, fpId?: string | null): string[] {
   const pa = (fp as { platforms_analyzed?: unknown }).platforms_analyzed;
+  const sourceUrls = sourceUrlsForFingerprint(fpId ?? null);
   if (Array.isArray(pa) && pa.length > 0) {
     const set = new Set<string>();
     for (const x of pa) {
-      if (typeof x === 'string' && x.trim()) set.add(x.trim());
+      if (typeof x === 'string' && x.trim()) set.add(displayPlatform(x.trim(), sourceUrls));
     }
     if (set.size > 0) return Array.from(set);
   }
   const pf = (fp as { platform_fingerprints?: unknown }).platform_fingerprints;
   if (pf && typeof pf === 'object') {
     const keys = Object.keys(pf as Record<string, unknown>).filter((k) => k.trim());
-    if (keys.length > 0) return keys;
+    if (keys.length > 0) return keys.map((k) => displayPlatform(k, sourceUrls));
   }
-  if (fallback && fallback.trim()) return [fallback.trim()];
+  if (fallback && fallback.trim()) return [displayPlatform(fallback.trim(), sourceUrls)];
   return ['未指定'];
 }
 

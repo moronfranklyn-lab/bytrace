@@ -127,6 +127,9 @@ export async function POST(req: NextRequest) {
     try {
       raw = await streamClaude(prompt, {
         signal: abortSignal,
+        // outline 走默认 Opus 且可能注入 research_material（素材包一大 prompt 就重），
+        // 默认 180s 偶尔顶不住 —— 显式放宽到 4 分钟，与 draft 每平台超时对齐
+        timeoutMs: 240_000,
         onChunk: (text) => send('chunk', { text }),
       });
     } catch (err) {

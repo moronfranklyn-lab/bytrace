@@ -19,8 +19,11 @@ export function createSseStream(
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let closed = false;
+      let lastActivity = Date.now();
+
       const send: SseSend = (event, data) => {
         if (closed) return;
+        lastActivity = Date.now();
         const payload =
           `event: ${event}\n` +
           `data: ${JSON.stringify(data)}\n\n`;
@@ -36,6 +39,22 @@ export function createSseStream(
         try { controller.close(); } catch {/* ignore */}
       };
 
+      // 心跳机制：每 10 秒发送一次 ping，防止长时间无数据导致连接超时
+      const heartbeatInterval = setInterval(() => {
+        if (closed) {
+          clearInterval(heartbeatInterval);
+          return;
+        }
+        // 只在 15 秒内没有其他数据时才发送心跳
+        if (Date.now() - lastActivity > 15_000) {
+          try {
+            controller.enqueue(encoder.encode(': heartbeat\n\n'));
+          } catch {
+            clearInterval(heartbeatInterval);
+          }
+        }
+      }, 10_000);
+
       try {
         await onStart(send, close, abortCtrl.signal);
       } catch (err) {
@@ -44,6 +63,7 @@ export function createSseStream(
           phase: 'unknown',
         });
       } finally {
+        clearInterval(heartbeatInterval);
         close();
       }
     },
@@ -75,9 +95,15 @@ export function stripJsonFence(raw: string): string {
   return raw.trim();
 }
 
-/** 去掉模型偶尔会包裹的 ```markdown ... ``` */
+/**
+ * 去掉模型偶尔会包裹的 ```markdown ... ```。
+ * 必须同时锚定 ^ 和 $：只剥"整段输出被单个围栏完整包裹"的情况。
+ * 老版本只锚定 $，正文若以 fenced code block 结尾（技术文/调研报告常见），
+ * 会从文中第一个 ``` 匹配起，把代码块之前的全部正文截掉。
+ */
 export function stripMarkdownFence(raw: string): string {
-  const fenceMatch = raw.match(/```(?:markdown|md)?\s*([\s\S]*?)```\s*$/i);
+  const trimmed = raw.trim();
+  const fenceMatch = trimmed.match(/^```(?:markdown|md)?\s*([\s\S]*?)```$/i);
   if (fenceMatch) return fenceMatch[1].trim();
-  return raw.trim();
+  return trimmed;
 }

@@ -1,7 +1,8 @@
 # AutoArticle · 项目构造记录
 
-> 写给下一个 Claude 看。也写给楠几周后回来看。
-> 最后更新：2026-06-29（v3.5 gather 事实底座落库 · 文档补记 v3.4 critic + Sonnet 4.6 切换两轮）
+> 写给下一个 Claude 看。也写给Ethan几周后回来看。
+> 最后更新：2026-07-07（全项目审查修复轮：5 子系统 ~50 项问题，49 项已修，tsc 全绿）
+> 上一次：2026-06-29（v3.5 gather 事实底座落库 · 文档补记 v3.4 critic + Sonnet 4.6 切换两轮）
 > 历史里程碑：
 >   2026-05-25 · v3.1 自动分类 + OpenCLI 接入 + 反爬约束 v2
 >   2026-05-25 · v3.2 风格配方（策略碎片组合可命名 / 保存 / 复用）
@@ -14,7 +15,7 @@
 
 本地 Next.js Web 应用。用户给一段思路（题材 + 角度 + 核心观点）+ 选一个博主风格指纹（或挑一份风格配方）+ 选一份站点画像 → 流式生成有深度、有论证骨架的成品文。
 
-**关键约束（违反会被楠纠正）**：
+**关键约束（违反会被Ethan纠正）**：
 
 - ✅ 走本机 Claude Code CLI（child_process）—— **不接 Anthropic API、不带 key、不联网调 LLM**
 - ✅ Claude CLI 必须用 `--output-format stream-json --include-partial-messages` 才会真流式。**别再用裸 `claude -p`**，会等整篇生成完才一次性返回（100+ 秒静默）
@@ -26,6 +27,22 @@
 - ✅ 文案语气**陪伴而非审判**："这次模型卡住了，我们换个角度再试一次" 不要 "生成失败"
 - ✅ **抽象论点必须配物件级类比**（v3.3 核心约束）：article prompt 强制让模型从博主 analogy_bank 里挑具象物件（"黄牛在天台抽烟" / "户口本进 iCloud"），禁止凭空造抽象隐喻（"如同登山"不算）
 - ✅ **每节正文首段必须回扣上节 thesis**（v3.3 核心约束）：避免"平铺列举式"伪深度，强制论证按因果链 / 双线对比 / 同心圆等形态走
+
+---
+
+## 2026-07-07 全项目审查 + 修复轮（要点速览）
+
+5 个审查 agent 并行扫全部子系统（LLM 管道 / 指纹引擎 / 爬虫 / DB+API / 前端 compose），交叉验证出 ~50 项问题，49 项已修复，33 文件 +979/-344，`tsc --noEmit` 全绿。**行为变更都是"修错"不是"改设计"**，铁律（CLI 订阅 / SQLite / 模型分工）全部保持。修复亮点：
+
+- **数据丢失级**：refine 覆盖抹掉多平台版本（新建 [lib/refine-versions.ts](lib/refine-versions.ts) 归一 dict/array，refine 写 / diff 读 / 历史页读三处共用）；draft 重写轮失败会把已评分好稿整个丢掉（改为 best-of-N 兜底）；critic 在最后一稿上挂时会用旧低分稿顶掉刚流完的新稿（`lastDraftUnscored` 标记修正）
+- **进程级**：claude.ts/codex.ts 的 ENOENT fallback 被旧进程 close 事件击穿（fallback 整体失效 + 进程泄漏，已加 `p !== proc` 守卫）；stdin 无 error 监听大 prompt 遇 CLI 秒退会 uncaughtException 崩整个 dev server；SIGTERM 5s 不退升级 SIGKILL
+- **爬虫**：小红书 OpenCLI `creator-notes-summary` 抓的是**登录账号自己**的笔记（已短路走 Apify）；公众号 OpenCliTimeout 击穿三级兜底链；throttle 并发绕过（改 promise 链队列）；Apify 结果位置兜底张冠李戴；试爬成本提示低报 25-100 倍
+- **指纹**：POST 路由补上 stage2 repair retry（原来只有 PATCH 有）；optimize 会把 v3 指纹降级成 v1 遮蔽（已拦截引导走 PATCH）；PATCH 重提炼不再无条件清空类别配方；stage1 补 15k 字截断 + 300s 超时
+- **前端 compose**：Stepper 回跳不掐在途流（双流交错 + 双落库）；空指纹库"跳过推荐"落死面板；5 个 SSE 消费端补"连接断开"兜底；refine 半截稿不再被当成缓存成稿
+- `stripMarkdownFence` 正则未锚定开头，正文以代码块结尾时前文全被截掉（draft/refine/research 共用路径，已修 + 回归测试过）
+
+**未修（记录在案）**：① 风格配方引用碎片 id，PATCH 重提炼整组换新 id 后配方静默失效——要 id 稳定化或回填，属设计级改动；② v3 POST 路由与 engine 的复制体漂移（本轮只同步了 repair，整体迁移到 `runV3Extraction` 留待下轮）；③ compose page 3123 行违反自家 L1-L5 分层（该抽 `useSseStream` hook）；④ Apify 无进程内预算护栏（$4.91 前科，建议加会话累计计数器）。
+**环境注意**：2026-07-07 发现本机环境重置过——node/npm/brew/codex/opencli 曾全部丢失。2026-07-08 已装回 **codex v0.143.0**（`~/.local/bin/codex`，原生二进制，登录态复用，端到端验证过；另有 `~/.npm-global/bin/{codex,claude}` symlink 兼容旧路径）。**Node / OpenCLI 仍缺失**——装回 Node 前项目起不来；OpenCLI 缺失时爬虫会走 Apify 烧钱通道，注意。claude CLI 在 `~/.local/bin/claude`，lib 里三处 fallback 路径已改为新旧位置双兜底。
 
 ---
 
@@ -88,7 +105,7 @@ compose 主流程的"信息搜集"环节：idea 一确认就 fire-and-forget 后
    - 复用现有 `DELETE /api/fingerprint/v3/[id]` 级联删 5 张表，**不动 API**
 
 5. **多平台一次出 N 个版本**（task 4，最大一件）
-   - **关键决策**（楠拍板）：
+   - **关键决策**（Ethan拍板）：
      - N 平台勾选入口在 Step 1（路径 A）：主卡保留单选作为"主平台 + 主画像"，主卡下加 chip 多选行；主平台默认勾且不可取消；非主平台走 generic **不挑站点画像**
      - outline **完全共享**（路径 a）：按主平台生成一份，draft 时各平台 article prompt 自行压缩 / 扩张
      - 服务端**串行**而非并发（决策 5）：本机 Claude 是 Pro 订阅，并发会撞限速
@@ -112,12 +129,12 @@ compose 主流程的"信息搜集"环节：idea 一确认就 fire-and-forget 后
 - `docs:` CLAUDE.md 补 2026-05-27 一轮 + 修正过期 TODO（v3.3 验证 ✅ / 热点聚合 ✅ / 多平台 ✅ / 配图 ✅）
 
 ### 本轮已知 tech debt / 边界 case
-- 🟡 **`articles.refine_versions_json` 列双格式**：draft route 写 dict（`{ [platform]: md }`），refine route 写 array（refine 历史追加）。两边各自 own 暂不冲突，但日后历史详情页 / `/api/articles/[id]/diff` 若要读这列需先 detect 是 dict 还是 array
+- ✅ **`articles.refine_versions_json` 列双格式已修**（2026-07-07）：原判断"两边各自 own 暂不冲突"不成立——refine 读到 dict 会落空成 `[]` 再整列覆盖写回，**真实丢多平台版本**；diff route 和历史列表页也读不到 dict。现统一走 [lib/refine-versions.ts](lib/refine-versions.ts) 的 `parseRefineVersions()` 归一（refine 写 / diff 读 / 列表页读三处共用）
 - 🟡 **多平台中止后只能整批重跑**：Step 6 "重新生成" 从头跑全部平台，没做"只重跑失败的"局部重试
 - 🟡 **v3.3 视觉对比仍未做**（CLAUDE.md 第 360 行）：用同一题材 + v3.3 升级后的指纹生成一篇，跟之前那篇"KPI 是合同"对比纵深 / 物件类比 / 结构差异
 
 ### Agent 协作的几条经验
-- **agent 改文件被沙箱拒了 Edit 权限**——主线程直接接手是最快路径，但消耗主上下文。如果主上下文充裕、改动面小，接手；否则重派 agent 让楠在权限窗口点允许
+- **agent 改文件被沙箱拒了 Edit 权限**——主线程直接接手是最快路径，但消耗主上下文。如果主上下文充裕、改动面小，接手；否则重派 agent 让Ethan在权限窗口点允许
 - **agent prompt 里要写"遇到不确定停下来问，别瞎拍板"**——agent D 就是这样发现 Step 1 单选这个前置 gap 的，5 个决策一次性回报，节省了瞎做被推倒重来的时间
 - **SendMessage 工具在当前环境没有**——无法续 agent 上下文，只能新派一个 agent 并把所有调查结果 + 决策一次性塞进 prompt（self-contained）
 - **指纹三字段写在顶层** 这种事实，agent prompt 里错指位置的话 agent 也会跟着错——CLAUDE.md 已是 truth-of-source，prompt 里别复述位置而是让 agent 自己读
@@ -395,14 +412,14 @@ lib/crawler/
 ## 关键决策的「为什么」（避免重蹈覆辙）
 
 ### 1. 为什么不接 Anthropic API，走本机 Claude CLI？
-楠没付 API key 钱，但订阅了 Claude Pro。`claude -p "<prompt>"` 通过本机订阅算费用。代价：要 spawn 子进程 + 流式接 stdout + 180s 超时管理。代码在 [lib/claude.ts](lib/claude.ts)。  
-**不要换成 @anthropic-ai/sdk**——会变成 SaaS 模式且让楠付双份钱。
+Ethan没付 API key 钱，但订阅了 Claude Pro。`claude -p "<prompt>"` 通过本机订阅算费用。代价：要 spawn 子进程 + 流式接 stdout + 180s 超时管理。代码在 [lib/claude.ts](lib/claude.ts)。  
+**不要换成 @anthropic-ai/sdk**——会变成 SaaS 模式且让Ethan付双份钱。
 
 ### 2. 为什么公众号默认不爬？
 公众号反爬极强，普通 fetch 触发 captcha。**已知唯一可用方案是 Apify 的 sian.agency/wechat-official-accounts-scraper，但单篇 $0.53**（FREE 用户 $0.14 startup + $0.39/item）。所以默认 [lib/crawler/wechat.ts](lib/crawler/wechat.ts) 走 Apify（如果有 token），否则返回 wechatRejection（"请粘贴正文"）。
 
 ### 3. 为什么 Apify B 站换成 zhorex？
-2026-05-24 楠拆解时被扣 $4.91/$5。复盘发现 sian.agency 系列对 FREE 用户收 $0.14 startup + $0.09-0.39/item，单 run $0.23-0.53。**zhorex/bilibili-scraper 只 $0.005/item 且无 startup**——便宜 50×。  
+2026-05-24 Ethan拆解时被扣 $4.91/$5。复盘发现 sian.agency 系列对 FREE 用户收 $0.14 startup + $0.09-0.39/item，单 run $0.23-0.53。**zhorex/bilibili-scraper 只 $0.005/item 且无 startup**——便宜 50×。  
 **保留 sian.agency** 在知乎和公众号——因为这两个**市面上找不到便宜替代**（搜遍 Apify Store + Bright Data/FireCrawl/Browserbase/Scrapfly 都没有中文 ready-made scraper）。
 
 ### 4. 为什么不接 FireCrawl / Browserbase / Bright Data？
@@ -416,7 +433,7 @@ lib/crawler/
 本地工具，单用户，零运维。better-sqlite3 同步 API 速度极快。**不要换 Postgres**。
 
 ### 6. 为什么不用 Ant Design / MUI？
-楠要"克制 + 书卷气"，用 Tailwind 手写组件 + CSS variables 做三主题切换（B/C/D）。**不要引 UI 库**。
+Ethan要"克制 + 书卷气"，用 Tailwind 手写组件 + CSS variables 做三主题切换（B/C/D）。**不要引 UI 库**。
 
 ### 7. 为什么有 v1 / v2 / v3 三套指纹拆解？
 迭代痕迹：
@@ -430,21 +447,21 @@ UI 默认走 v3。v1/v2 的代码不要删——老指纹用 `version_schema` �
 `lib/crawler/apify.ts:getApifyToken()` 先看 DB 再看 env。**DB 优先**让用户能在 UI 上即改即生效。env 是部署 / fallback 兜底。
 
 ### 9. 主题切换为什么不能贴边？
-楠的明确审美：主题切换器**必须收在导航栏下拉里**，不能在右下角悬浮。[components/theme/ThemeSwitcher.tsx](components/theme/ThemeSwitcher.tsx) 已挂在 HomeNav 里。
+Ethan的明确审美：主题切换器**必须收在导航栏下拉里**，不能在右下角悬浮。[components/theme/ThemeSwitcher.tsx](components/theme/ThemeSwitcher.tsx) 已挂在 HomeNav 里。
 
 ### 10. 为什么所有的运行时是 nodejs 不是 edge？
 better-sqlite3 是原生模块，跑不了 edge runtime。**每个 route.ts 顶部都要写 `export const runtime = 'nodejs'`**。
 
 ### 11. 为什么 streamClaude 要用 stream-json 而不是裸 `claude -p`？
-楠在 Step 6 流式正文页看到"已 0 字"等了 100+ 秒——根因是 `claude -p` 默认**不流式**，整篇答完才一口气吐 stdout。换成 `--output-format stream-json --input-format stream-json --include-partial-messages` 后，**5-6 秒就有第一个 chunk**，按 `content_block_delta > text_delta.text` 解析喂给 onChunk。  
+Ethan在 Step 6 流式正文页看到"已 0 字"等了 100+ 秒——根因是 `claude -p` 默认**不流式**，整篇答完才一口气吐 stdout。换成 `--output-format stream-json --input-format stream-json --include-partial-messages` 后，**5-6 秒就有第一个 chunk**，按 `content_block_delta > text_delta.text` 解析喂给 onChunk。  
 对外契约不变（onChunk 仍是 plain text，返回值是 assembled text），所有调用方零迁移。代码在 [lib/claude.ts](lib/claude.ts)。
 
 ### 12. 为什么 v3 指纹要有 Stage 0 自动分类 + 类别细分？
-楠观察："一些博主会对热点追踪，可能写科技 / 经济 / 知识等多种类，希望能针对性抓取策略，又能跨博主综合分析"。  
+Ethan观察："一些博主会对热点追踪，可能写科技 / 经济 / 知识等多种类，希望能针对性抓取策略，又能跨博主综合分析"。  
 解法：8 个固定类别白名单（**不让模型自由分类**，避免"AI技术 / 人工智能 / 科技前沿"碎片化），单类 ≥ 3 篇时生成 `fingerprint_category_profiles` 专属配方，整库进 `strategy_fragments_indexed` 跨博主索引。写作时按类别筛碎片，比按博主筛精准。
 
 ### 13. 为什么 v3.3 要加 structure_repertoire / depth_pattern / analogy_bank？
-楠观察："工具产出文章总是浮于表面，用词非常抽象，有趣是有趣但是会让人审美疲劳"。  
+Ethan观察："工具产出文章总是浮于表面，用词非常抽象，有趣是有趣但是会让人审美疲劳"。  
 对比半佛仙人发现：模型抓到了**形式特征**（短句独段 / 数字分节 / 反差幽默），但漏了**内容特征**——
 - **论证形态**：半佛是因果链层层挖根（"苹果降价→不是讲良心→是商业策略→策略来自担忧→担忧是失去定义权→若失去会变诺基亚"），工具是平铺列举（"努力是常数 / KPI 是合同 / 内卷是贬值 / 时间不是资产"，5 个独立论点不咬合）
 - **物件类比**：半佛用"户口本进 iCloud / 黄牛在天台抽烟 / 中年人体检报告"，工具用"过路费 / 入场券 / 牌桌"（抽象隐喻）
@@ -465,7 +482,7 @@ v3.3 升级 prompt 后，老 v3 指纹的 fingerprint_json 没有 structure_repe
 ## 未完成事项 / 已知坑
 
 ### Apify 相关
-- ⚠️ **本月额度已 $4.91/$5**，6 月 1 号才重置。继续测试**需要楠充值**或等月底
+- ⚠️ **本月额度已 $4.91/$5**，6 月 1 号才重置。继续测试**需要Ethan充值**或等月底
 - ⚠️ env 里 `APIFY_TOKEN` 已注释（[autoarticle/.env.local](.env.local)）——重启用需 uncomment 或在 [/settings/preferences](http://localhost:3100/settings/preferences) 重填
 - 🟡 `lib/crawler/apify.ts` 里 `fetchBilibiliCaption` 是 **deprecated stub** 直接返 null。新的 zhorex actor 在 video_detail mode 同时返字幕，不再需要单独调
 - 🟡 `estimateActorCost` 是"sync 接口 usageTotalUsd=0 时的预估"——真实 cost 会在 status pill 60s 轮询时显示准确值
@@ -483,7 +500,7 @@ v3.3 升级 prompt 后，老 v3 指纹的 fingerprint_json 没有 structure_repe
 ### v3.3 验证 / 后续（2026-05-26）
 - ✅ **v3.3 端到端验证通过**（2026-05-27 复核）：思敏学姐指纹（id `x6xiH7pG20ytvU`）顶层三字段都已就位 —— `structure_repertoire`（dominant=problem_solution，4 种结构带 execution_traits）/ `depth_pattern`（average_layers=4，6 条 drilling_phrases）/ `analogy_bank`（15 个物件级类比，全具象无抽象隐喻）。**注意**：这三字段写在 fingerprint_json **顶层**，不是 platform_fingerprints[平台] 下——读取时别走平台节点
 - 🟡 **v3.3 视觉对比未做**：理想做法是用同一题材（"努力越努力越穷"）+ v3.3 升级后的指纹生成一次，跟之前那篇"KPI 是合同"对比纵深 / 物件类比 / 结构差异
-- ✅ **多平台一次出 N 个版本**（2026-05-27 落地）：Step 1 主卡保留单选作"主平台/主画像"，下加 chip 多选「顺手出这些版本」；outline 完全共享按主平台生成；draft route 服务端按 `platforms[]` **串行**循环 streamClaude（避免本机 Claude 订阅并发限速），SSE 协议带 `open / platform_start / delta{platform,delta} / platform_done{platform,content_md,word_count} / done{versions,errors} / error{platform?,message}`；Step 6 改 tabbed，每平台独立 scroll 容器（display:none 切换不丢已流内容），状态文字"排队中/流式中/已完成 N 字"无 emoji；Step 7 直接命中 `refineMap` 缓存不再调 refine。**单平台路径退化等同改动前**。**已知边界**：`articles.refine_versions_json` 列 draft 写 dict 形态（`{[platform]: md}`）、refine route 写 array 形态——两边各自 own 暂不冲突，但日后历史详情页 / diff API 若要读这列需先 detect 是 dict 还是 array
+- ✅ **多平台一次出 N 个版本**（2026-05-27 落地）：Step 1 主卡保留单选作"主平台/主画像"，下加 chip 多选「顺手出这些版本」；outline 完全共享按主平台生成；draft route 服务端按 `platforms[]` **串行**循环 streamClaude（避免本机 Claude 订阅并发限速），SSE 协议带 `open / platform_start / delta{platform,delta} / platform_done{platform,content_md,word_count} / done{versions,errors} / error{platform?,message}`；Step 6 改 tabbed，每平台独立 scroll 容器（display:none 切换不丢已流内容），状态文字"排队中/流式中/已完成 N 字"无 emoji；Step 7 直接命中 `refineMap` 缓存不再调 refine。**单平台路径退化等同改动前**。~~已知边界：refine_versions_json 双格式暂不冲突~~——2026-07-07 审查推翻：refine 写侧会覆盖丢数据，已统一走 [lib/refine-versions.ts](lib/refine-versions.ts) 归一，详见「未完成事项」节
 - ✅ **配图自动接进 draft 流**（2026-05-27 落地）：`components/compose/ImagePanel.tsx` 加 `autoStart?: boolean` prop + useEffect + `autoStartedRef` 防重复触发；`app/compose/page.tsx` Step 7 占位 Panel 换成真 `<ImagePanel articleContent={draftMd} fingerprintId={按 weight 排序取主博主} autoStart />`。复用现有 `/api/images/auto` POST，不需要新加端点 / 不动 schema
 
 ### 已知非阻塞问题
@@ -575,9 +592,9 @@ gh repo create autoarticle --private --source=. --push
 ## 给下次的你
 
 1. **改之前先读这个文档 + 跑 `git log --oneline -20`** 看最近改了啥
-2. **多 agent 并行做独立任务**是楠确认过的偏好——不要等楠让你才并行
+2. **多 agent 并行做独立任务**是Ethan确认过的偏好——不要等Ethan让你才并行
 3. **决策点用 AskUserQuestion 摆卡片**，不要在 chat 里列编号问题
-4. **称呼楠**——每条消息开头叫"楠"
+4. **称呼Ethan**——每条消息开头叫"Ethan"
 5. **写代码前先想 cost**——Apify 烧钱过历史，加 Apify 调用前要算 per-run 成本；加 Claude 调用前要估时间和配额（单 stage2 重跑 ~5-8 分钟）
 6. **改 schema 用 ALTER 幂等**——不要碰 schema.sql 顶层
 7. **STATUS-*.md 是旧 agent 的工作记录**——读不读看时间够不够，不必每次都翻

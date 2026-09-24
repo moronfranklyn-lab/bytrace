@@ -1,7 +1,7 @@
 /**
  * 小红书适配器（v2 · OpenCLI 接入后）。
  *
- * 优先级：OpenCLI xiaohongshu note/user → Apify zhorex（兜底）→ blocked。
+ * 优先级：OpenCLI xiaohongshu note/user → blocked。
  *
  * 风险等级（CLAUDE.md「反爬与账号边界 v2」）：
  * - 小红书风控强；OpenCLI 借登录会话能用，但「短时连续 > 20 篇」会触发风控
@@ -16,11 +16,6 @@ import type {
   CrawlError,
 } from '../types';
 import { hashUrl } from '../dedupe';
-import {
-  isApifyEnabled,
-  fetchXiaohongshuPost,
-  fetchXiaohongshuUserPosts,
-} from '../apify';
 import {
   runOpenCliJson,
   OpenCliNotAvailable,
@@ -42,29 +37,9 @@ export const adapter: SiteAdapter = {
   },
 
   async crawlArticle(url: URL): Promise<CrawledArticle | CrawlError> {
-    // Tier 1: OpenCLI
+    // OpenCLI
     const openCliResult = await crawlNoteViaOpenCli(url);
     if (openCliResult) return openCliResult;
-
-    // Tier 2: Apify 兜底
-    if (isApifyEnabled()) {
-      const r = await fetchXiaohongshuPost(url.toString());
-      if (r) {
-        const urlStr = r.post.postUrl || url.toString();
-        return {
-          url: urlStr,
-          url_hash: hashUrl(urlStr),
-          title: r.post.title || null,
-          content: r.post.content,
-          images: [],
-          source: 'cheerio',
-          host: url.hostname,
-          apify_run_id: r.runId,
-          apify_cost_usd: r.costUsd,
-          apify_platform: 'xiaohongshu',
-        };
-      }
-    }
 
     return {
       reason: 'blocked',
@@ -73,21 +48,9 @@ export const adapter: SiteAdapter = {
   },
 
   async crawlAuthorIndex(url: URL): Promise<CrawledAuthorIndex | CrawlError> {
-    // Tier 1: OpenCLI creator-notes / creator-notes-summary
+    // OpenCLI creator-notes / creator-notes-summary
     const openCliResult = await crawlUserViaOpenCli(url);
     if (openCliResult) return openCliResult;
-
-    // Tier 2: Apify 兜底
-    if (isApifyEnabled()) {
-      const r = await fetchXiaohongshuUserPosts(url.toString(), 30);
-      if (r) {
-        return {
-          author_name: r.authorName,
-          platform: '小红书',
-          article_urls: r.postUrls,
-        };
-      }
-    }
 
     return {
       reason: 'blocked',
@@ -153,41 +116,15 @@ async function crawlNoteViaOpenCli(url: URL): Promise<CrawledArticle | null> {
 }
 
 /**
- * OpenCLI xiaohongshu creator-notes 输出：
- *   [{ rank, note_id, title, post_url, views, likes, ... }, ...]
+ * 小红书用户主页的 OpenCLI 通道——语义不成立，直接返回 null。
+ *
+ * 原实现调 `xiaohongshu creator-notes-summary`，但那是**创作者中心**命令，
+ * 返回的是「当前登录账号自己」的笔记列表，跟 URL 里的目标博主毫无关系——
+ * 拆解任意博主时会静默把自己账号的笔记灌成别人的样本。
+ * OpenCLI 目前没有「按 user_id 拉任意博主笔记列表」的命令，所以这条通道
+ * 直接返回 null。
  */
 async function crawlUserViaOpenCli(url: URL): Promise<CrawledAuthorIndex | null> {
-  // 从 URL 提 user_id：/user/profile/<id>
-  const m = url.pathname.match(/^\/user\/profile\/([a-z0-9]+)/i);
-  if (!m) return null;
-
-  let rows: Array<Record<string, unknown>>;
-  try {
-    rows = await runOpenCliJson<Array<Record<string, unknown>>>(
-      ['xiaohongshu', 'creator-notes-summary'],
-      { timeoutMs: 90_000 },
-    );
-  } catch (err) {
-    if (err instanceof OpenCliNotAvailable) return null;
-    if (err instanceof OpenCliError) {
-      console.warn('OpenCLI xhs creator-notes 失败：' + err.message.slice(0, 200));
-      return null;
-    }
-    return null;
-  }
-
-  if (!Array.isArray(rows) || rows.length === 0) return null;
-
-  const urls: string[] = [];
-  for (const r of rows) {
-    const u = (r.post_url || r.url || r.note_url) as string | undefined;
-    if (typeof u === 'string' && /^https?:\/\//i.test(u)) urls.push(u);
-  }
-  if (urls.length === 0) return null;
-
-  return {
-    author_name: null, // OpenCLI 这条命令不直接返作者名，调用方可能要再查 creator-profile
-    platform: '小红书',
-    article_urls: urls,
-  };
+  void url;
+  return null;
 }

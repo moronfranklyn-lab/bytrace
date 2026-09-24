@@ -10,6 +10,8 @@
 export interface SiteProfileArticle {
   title?: string;
   url?: string;
+  /** 原文发布时间 / 写作时间，抓不到则为空。 */
+  publish_time?: string | null;
   content: string;
 }
 
@@ -30,9 +32,11 @@ export function buildSiteProfilePrompt(
       const title = (a.title ?? '').trim() || '（无标题）';
       const url = a.url?.trim() || '';
       const content = (a.content ?? '').trim();
+      const publishTime = a.publish_time?.trim() || '';
       return [
         `===== 文章 ${idx} =====`,
         `标题：${title}`,
+        publishTime ? `写作时间：${publishTime}` : '',
         url ? `URL：${url}` : '',
         '正文：',
         content,

@@ -146,13 +146,126 @@ function CodeIcon() { return <svg width="14" height="14" viewBox="0 0 24 24" fil
 function FileIcon() { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>; }
 function TextIcon() { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="17" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="17" y1="18" x2="3" y2="18"/></svg>; }
 
-interface ExportButton { label: string; icon: () => ReactElement; mime: 'html' | 'md' | 'txt'; toast: string; }
+interface ExportButton {
+  label: string;
+  icon: () => ReactElement;
+  format: 'html' | 'md' | 'xhs-png' | 'txt';
+  toast: string;
+}
 const EXPORTS: ExportButton[] = [
-  { label: '公众号 HTML', icon: CodeIcon, mime: 'html', toast: '已复制公众号 HTML 到剪贴板' },
-  { label: 'Markdown', icon: FileIcon, mime: 'md', toast: '已复制 Markdown 到剪贴板' },
-  { label: '小红书图片', icon: ImageIcon, mime: 'md', toast: '小红书图片导出（暂未接入 · mock）' },
-  { label: '纯文本', icon: TextIcon, mime: 'txt', toast: '纯文本已复制到剪贴板' },
+  { label: '公众号 HTML', icon: CodeIcon, format: 'html', toast: '公众号 HTML 已下载' },
+  { label: 'Markdown', icon: FileIcon, format: 'md', toast: 'Markdown 已下载' },
+  { label: '小红书长图', icon: ImageIcon, format: 'xhs-png', toast: '小红书长图已下载' },
+  { label: '纯文本', icon: TextIcon, format: 'txt', toast: '纯文本已下载' },
 ];
+
+function safeExportName(md: string, fallback = '未命名文章'): string {
+  const heading = md.match(/^#\s+(.+?)\s*$/m)?.[1]?.trim() || fallback;
+  return heading.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-').replace(/\s+/g, ' ').slice(0, 60);
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function markdownToPlainText(md: string): string {
+  return md
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^>\s?/gm, '')
+    .replace(/^[-*+]\s+/gm, '')
+    .replace(/^\d+\.\s+/gm, '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/[*_`~]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+async function exportXhsLongImage(md: string): Promise<void> {
+  const title = safeExportName(md);
+  const body = markdownToPlainText(md.replace(/^#\s+.*$/m, '')).trim();
+  const width = 1080;
+  const paddingX = 92;
+  const contentWidth = width - paddingX * 2;
+  const titleSize = 54;
+  const bodySize = 34;
+  const bodyLineHeight = 58;
+  const paragraphGap = 26;
+
+  const measure = document.createElement('canvas').getContext('2d');
+  if (!measure) throw new Error('浏览器没能创建图片画布');
+  measure.font = `400 ${bodySize}px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif`;
+
+  const paragraphs = body.split(/\n+/).map((p) => p.trim()).filter(Boolean);
+  const lines: Array<{ text: string; gapAfter: boolean }> = [];
+  for (const paragraph of paragraphs) {
+    let line = '';
+    const chars = Array.from(paragraph);
+    for (const char of chars) {
+      const candidate = line + char;
+      if (line && measure.measureText(candidate).width > contentWidth) {
+        lines.push({ text: line, gapAfter: false });
+        line = char;
+      } else {
+        line = candidate;
+      }
+    }
+    if (line) lines.push({ text: line, gapAfter: true });
+  }
+
+  const bodyHeight = lines.reduce((sum, line) => sum + bodyLineHeight + (line.gapAfter ? paragraphGap : 0), 0);
+  const height = Math.max(1440, 300 + bodyHeight + 160);
+  if (height > 16000) throw new Error('正文太长，请先切换到小红书版本再导出');
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('浏览器没能创建图片画布');
+
+  ctx.fillStyle = '#f7f4ee';
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = '#cf553d';
+  ctx.fillRect(paddingX, 78, 72, 8);
+  ctx.fillStyle = '#1e1d1a';
+  ctx.font = `600 ${titleSize}px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif`;
+  ctx.textBaseline = 'top';
+
+  let y = 112;
+  let titleLine = '';
+  for (const char of Array.from(title)) {
+    const candidate = titleLine + char;
+    if (titleLine && ctx.measureText(candidate).width > contentWidth) {
+      ctx.fillText(titleLine, paddingX, y);
+      y += 72;
+      titleLine = char;
+    } else titleLine = candidate;
+  }
+  if (titleLine) ctx.fillText(titleLine, paddingX, y);
+  y += 104;
+
+  ctx.fillStyle = '#37342f';
+  ctx.font = `400 ${bodySize}px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif`;
+  for (const line of lines) {
+    ctx.fillText(line.text, paddingX, y);
+    y += bodyLineHeight + (line.gapAfter ? paragraphGap : 0);
+  }
+
+  ctx.fillStyle = '#8b857b';
+  ctx.font = '400 24px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+  ctx.fillText('由 AutoArticle 排版导出', paddingX, height - 72);
+
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png', 0.94));
+  if (!blob) throw new Error('图片生成失败');
+  downloadBlob(blob, `${title}-小红书长图.png`);
+}
 
 const IDEA_CHIPS = [
   '为什么越努力越穷？从剩余价值的现代变形入手，结合 996/KPI/内卷三个现象，落到议价权而非时间。',
@@ -244,6 +357,7 @@ export default function ComposePage() {
   const [recommendStream, setRecommendStream] = useState('');
   const [pickedRec, setPickedRec] = useState<number | null>(null);
   const [emptyLibrary, setEmptyLibrary] = useState(false);
+  const recommendCtrl = useRef<AbortController | null>(null);
 
   // Step 4 — selected authors after tuning
   const [authors, setAuthors] = useState<SelectedAuthor[]>([]);
@@ -292,6 +406,7 @@ export default function ComposePage() {
   const [outlineLoading, setOutlineLoading] = useState(false);
   const [outlineStream, setOutlineStream] = useState('');
   const [outlineError, setOutlineError] = useState<string | null>(null);
+  const outlineCtrl = useRef<AbortController | null>(null);
 
   // Step 6 — draft
   /**
@@ -351,6 +466,7 @@ export default function ComposePage() {
   });
   const [refineLoading, setRefineLoading] = useState(false);
   const [refineMap, setRefineMap] = useState<Partial<Record<PlatformKey, string>>>({});
+  const refineCtrl = useRef<AbortController | null>(null);
   const [articleId, setArticleId] = useState<string | null>(null);
 
   // Toast
@@ -361,6 +477,116 @@ export default function ComposePage() {
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast((t) => ({ ...t, visible: false })), 2400);
   }, []);
+
+  // 回跳 / 卸载时统一掐断所有在途流（gather 是后台任务，另有自己的生命周期，不在此列）。
+  // 不清空 ref：各流自己的 catch 会按"是否仍是当前一轮"判断要不要收尾状态。
+  const abortInflightStreams = useCallback(() => {
+    for (const ref of [recommendCtrl, outlineCtrl, draftCtrl, refineCtrl]) {
+      if (ref.current) {
+        try { ref.current.abort(); } catch {/* ignore */}
+      }
+    }
+  }, []);
+
+  // 组件卸载：掐掉所有在途流（含后台 gather）+ 清 toast 定时器，避免卸载后连接泄漏
+  useEffect(() => {
+    return () => {
+      abortInflightStreams();
+      if (gatherCtrl.current) {
+        try { gatherCtrl.current.abort(); } catch {/* ignore */}
+      }
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+    };
+  }, [abortInflightStreams]);
+
+  // 从 URL 加载已有文章（用于历史文章"预览导出"按钮）
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const articleIdFromUrl = params.get('article_id');
+    if (!articleIdFromUrl) return;
+
+    // 避免重复加载
+    if (articleId === articleIdFromUrl) return;
+
+    // 加载文章数据
+    fetch(`/api/articles/${articleIdFromUrl}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((article: {
+        id: string;
+        title: string | null;
+        content_md: string | null;
+        platform_target: string | null;
+        outline: Outline | null;
+        refine_versions: unknown;
+      }) => {
+        if (!article.content_md) {
+          showToast('文章内容为空');
+          return;
+        }
+
+        // 恢复状态
+        setArticleId(article.id);
+        const platformKey = article.platform_target as PlatformKey || 'wechat';
+        setTargetPlatform(platformKey);
+        setPreviewPlatform(platformKey);
+        setDraftMainPlatform(platformKey);
+        setDraftPlatforms([platformKey]);
+
+        // 设置 draft 内容
+        setDraftMap({
+          [platformKey]: {
+            status: 'done',
+            content_md: article.content_md,
+            word_count: article.content_md.length,
+            critic: null,
+          },
+        });
+        setActiveDraftTab(platformKey);
+        setDraftDone(true);
+
+        // 恢复 outline
+        if (article.outline) {
+          setOutline(article.outline);
+        }
+
+        // 恢复 refine 版本
+        if (article.refine_versions) {
+          try {
+            const versions = article.refine_versions;
+            const refineMap: Partial<Record<PlatformKey, string>> = {};
+            if (Array.isArray(versions)) {
+              for (const v of versions) {
+                if (v.target_platform && v.content_md) {
+                  refineMap[v.target_platform as PlatformKey] = v.content_md;
+                }
+              }
+            } else if (typeof versions === 'object') {
+              // 兼容旧的 dict 格式
+              for (const [key, val] of Object.entries(versions)) {
+                if (typeof val === 'string') {
+                  refineMap[key as PlatformKey] = val;
+                } else if (val && typeof val === 'object' && 'content_md' in val) {
+                  refineMap[key as PlatformKey] = (val as { content_md: string }).content_md;
+                }
+              }
+            }
+            setRefineMap(refineMap);
+          } catch {
+            // ignore
+          }
+        }
+
+        // 直接跳到步骤 7
+        setStep(7);
+        showToast('文章已加载');
+      })
+      .catch((err) => {
+        showToast(`加载文章失败：${(err as Error).message}`);
+      });
+  }, [articleId, showToast]);
 
   const ideaWordCount = useMemo(() => countWords(idea), [idea]);
 
@@ -450,7 +676,9 @@ export default function ComposePage() {
     setGatherFromCache(false);
     setGatherError(null);
     setGatherElapsedMs(0);
-    setGatherStartedAt(Date.now());
+    // 用局部变量计时：progress 回调闭包里读 state 拿到的是旧值，恒算错
+    const startedAt = Date.now();
+    setGatherStartedAt(startedAt);
 
     const ctrl = new AbortController();
     gatherCtrl.current = ctrl;
@@ -469,6 +697,8 @@ export default function ComposePage() {
           return;
         }
         const reader = resp.body.getReader();
+        // 流正常关闭但没收到 done/error（比如 dev server 重启）时，别让"搜集中"永久卡死
+        let sawDone = false;
         for await (const evt of readSseEvents(reader)) {
           // idea 中途改过，老结果作废
           if (gatherCurrentIdeaRef.current !== trimmed) return;
@@ -483,7 +713,7 @@ export default function ComposePage() {
             setGatherIdeaHash(d.idea_hash ?? '');
           } else if (evt.event === 'progress') {
             // 心跳：让 UI 知道 codex 还在干活，不卡死
-            setGatherElapsedMs(Date.now() - (gatherStartedAt ?? Date.now()));
+            setGatherElapsedMs(Date.now() - startedAt);
           } else if (evt.event === 'done') {
             const d = evt.data as {
               material_md?: string;
@@ -498,11 +728,17 @@ export default function ComposePage() {
             setGatherElapsedMs(d.elapsed_ms ?? 0);
             setGatherFromCache(!!d.from_cache);
             setGatherStatus('done');
+            sawDone = true;
           } else if (evt.event === 'error') {
             const d = evt.data as { message?: string };
             setGatherStatus('error');
             setGatherError(d.message || 'codex 搜集出了点状况');
+            sawDone = true;
           }
+        }
+        if (!sawDone && gatherCurrentIdeaRef.current === trimmed) {
+          setGatherStatus('error');
+          setGatherError('连接断开了，可以点重试再搜一次');
         }
       } catch (e) {
         if ((e as Error).name === 'AbortError') return;
@@ -510,7 +746,7 @@ export default function ComposePage() {
         setGatherError((e as Error).message);
       }
     })();
-  }, [gatherStartedAt]);
+  }, []);
 
   // ----- Step 2 -> 3 -----
   const goRecommend = useCallback(async () => {
@@ -528,9 +764,17 @@ export default function ComposePage() {
     setPickedRec(null);
     setEmptyLibrary(false);
 
+    // 掐掉上一轮还在途的推荐流（重试 / 回跳再进都可能触发），避免两条流并发交错
+    if (recommendCtrl.current) {
+      try { recommendCtrl.current.abort(); } catch {/* ignore */}
+    }
+    const ctrl = new AbortController();
+    recommendCtrl.current = ctrl;
+
     try {
       const resp = await fetch('/api/recommend', {
         method: 'POST',
+        signal: ctrl.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idea, target_platform: targetPlatform ?? undefined }),
       });
@@ -557,6 +801,7 @@ export default function ComposePage() {
 
       if (!resp.body) { setRecommendError('响应没有 body'); setRecommendLoading(false); return; }
       const reader = resp.body.getReader();
+      let sawDone = false;
       for await (const evt of readSseEvents(reader)) {
         if (evt.event === 'chunk') {
           const text = (evt.data as { text?: string })?.text ?? '';
@@ -565,13 +810,22 @@ export default function ComposePage() {
           const recs = (evt.data as { recommendations?: RecommendCard[] })?.recommendations ?? [];
           setRecommendations(recs);
           setRecommendLoading(false);
+          sawDone = true;
         } else if (evt.event === 'error') {
           const d = evt.data as { message?: string };
           setRecommendError(d.message || '模型那边出了点小问题');
           setRecommendLoading(false);
+          sawDone = true;
         }
       }
+      // 流正常关闭但没收到终结事件（比如 dev server 重启）：别让加载态永久卡死
+      if (!sawDone && recommendCtrl.current === ctrl) {
+        setRecommendError('连接断开了，可以再试一次');
+        setRecommendLoading(false);
+      }
     } catch (e) {
+      // 已被新一轮接管 / 主动中止：别动状态，让新一轮自己管
+      if (recommendCtrl.current !== ctrl || (e as Error).name === 'AbortError') return;
       setRecommendError((e as Error).message);
       setRecommendLoading(false);
     }
@@ -599,15 +853,6 @@ export default function ComposePage() {
     setStep(4);
   }, [recommendations]);
 
-  // 跳过推荐（指纹库空 / 用户选择"我自己选"）
-  const skipRecommendation = useCallback(() => {
-    setChosenRecommendation(null);
-    setStep(emptyLibrary ? 5 : 4);
-    if (emptyLibrary) {
-      setAuthors([]);
-    }
-  }, [emptyLibrary]);
-
   // v3.5：实际发起 outline fetch（独立函数，goOutline 与"软等待 useEffect"共用）
   const runOutlineFetch = useCallback(async (materialOverride?: string) => {
     setOutlineLoading(true);
@@ -634,9 +879,17 @@ export default function ComposePage() {
         ? (materialOverride || undefined)
         : (ref === 'done' && refMd ? refMd : undefined);
 
+    // 掐掉上一轮还在途的 outline 流（重试 / 回跳再进都可能触发），避免两条流交错写 outlineStream
+    if (outlineCtrl.current) {
+      try { outlineCtrl.current.abort(); } catch {/* ignore */}
+    }
+    const ctrl = new AbortController();
+    outlineCtrl.current = ctrl;
+
     try {
       const resp = await fetch('/api/compose/outline', {
         method: 'POST',
+        signal: ctrl.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           idea,
@@ -648,6 +901,7 @@ export default function ComposePage() {
       });
       if (!resp.body) { setOutlineError('响应没有 body'); setOutlineLoading(false); return; }
       const reader = resp.body.getReader();
+      let sawDone = false;
       for await (const evt of readSseEvents(reader)) {
         if (evt.event === 'chunk') {
           const text = (evt.data as { text?: string })?.text ?? '';
@@ -656,13 +910,22 @@ export default function ComposePage() {
           const ol = (evt.data as { outline?: Outline })?.outline;
           if (ol) setOutline(ol);
           setOutlineLoading(false);
+          sawDone = true;
         } else if (evt.event === 'error') {
           const d = evt.data as { message?: string };
           setOutlineError(d.message || '大纲生成出了点状况');
           setOutlineLoading(false);
+          sawDone = true;
         }
       }
+      // 流正常关闭但没收到终结事件（比如 dev server 重启）：别让"正在写大纲"永久卡死
+      if (!sawDone && outlineCtrl.current === ctrl) {
+        setOutlineError('连接断开了，可以点「再试一次」重来');
+        setOutlineLoading(false);
+      }
     } catch (e) {
+      // 已被新一轮接管 / 主动中止：别动状态，让新一轮自己管
+      if (outlineCtrl.current !== ctrl || (e as Error).name === 'AbortError') return;
       setOutlineError((e as Error).message);
       setOutlineLoading(false);
     }
@@ -679,6 +942,19 @@ export default function ComposePage() {
     }
     await runOutlineFetch();
   }, [gatherStatus, runOutlineFetch]);
+
+  // 跳过推荐（指纹库空 / 用户选择"我自己选"）
+  // 指纹库为空时不能裸跳 Step 5——没有任何入口会触发大纲生成，新用户会停在空面板。
+  // 复用 goOutline：它自带 gather 软等待逻辑。定义放在 goOutline 之后，避免暂时性死区。
+  const skipRecommendation = useCallback(() => {
+    setChosenRecommendation(null);
+    if (emptyLibrary) {
+      setAuthors([]);
+      void goOutline();
+    } else {
+      setStep(4);
+    }
+  }, [emptyLibrary, goOutline]);
 
   // v3.5：软等待续接——当用户在等 gather 时，gatherStatus 一旦从 running 变成 done/error/skipped
   //   立刻触发真正的 outline fetch；同一份等待面板下完成自动续上。
@@ -698,8 +974,24 @@ export default function ComposePage() {
     void runOutlineFetch('');
   }, [runOutlineFetch]);
 
+  // 中止 / 连接断开时，把还没写完的平台状态收敛掉，避免 tab 永远停在"流式中 / 排队中"
+  const settleUnfinishedDrafts = useCallback((message: string) => {
+    setDraftMap((m) => {
+      const next = { ...m };
+      let changed = false;
+      for (const key of Object.keys(next) as PlatformKey[]) {
+        const entry = next[key];
+        if (entry && entry.status !== 'done' && entry.status !== 'error') {
+          next[key] = { ...entry, status: 'error', critic_phase: undefined, error: message };
+          changed = true;
+        }
+      }
+      return changed ? next : m;
+    });
+  }, []);
+
   // Step 5 -> 6：流式写正文（支持多平台版本，循环 N 次）
-  const goDraft = useCallback(async () => {
+  const goDraft = useCallback(async (retryPlatforms?: PlatformKey[]) => {
     if (!outline) {
       showToast('大纲还没准备好');
       return;
@@ -707,25 +999,35 @@ export default function ComposePage() {
     setStep(6);
     // 构造平台列表：主平台 + additionalPlatforms 去重
     const main: PlatformKey = targetPlatform ?? 'wechat';
-    const platforms: PlatformKey[] = [main];
-    for (const p of additionalPlatforms) {
-      if (p !== main && !platforms.includes(p)) platforms.push(p);
+    const platforms: PlatformKey[] = retryPlatforms?.length ? [...retryPlatforms] : [main];
+    if (!retryPlatforms?.length) {
+      for (const p of additionalPlatforms) {
+        if (p !== main && !platforms.includes(p)) platforms.push(p);
+      }
     }
+    const isPartialRetry = !!retryPlatforms?.length;
 
     // 初始化每平台状态
-    const initialMap: Partial<Record<PlatformKey, DraftEntry>> = {};
-    for (const p of platforms) {
-      initialMap[p] = { status: 'pending', content_md: '' };
+    if (isPartialRetry) {
+      setDraftMap((current) => {
+        const next = { ...current };
+        for (const p of platforms) next[p] = { status: 'pending', content_md: '' };
+        return next;
+      });
+      setActiveDraftTab(platforms[0]);
+    } else {
+      const initialMap: Partial<Record<PlatformKey, DraftEntry>> = {};
+      for (const p of platforms) initialMap[p] = { status: 'pending', content_md: '' };
+      setDraftPlatforms(platforms);
+      setDraftMainPlatform(main);
+      setDraftMap(initialMap);
+      setActiveDraftTab(platforms[0]);
+      setArticleId(null);
+      setRefineMap({});
     }
-    setDraftPlatforms(platforms);
-    setDraftMainPlatform(main);
-    setDraftMap(initialMap);
-    setActiveDraftTab(platforms[0]);
     setDraftLoading(true);
     setDraftDone(false);
     setDraftError(null);
-    setArticleId(null);
-    setRefineMap({});
 
     const composition = {
       selected_authors: authors
@@ -738,12 +1040,25 @@ export default function ComposePage() {
       custom_notes: customNotes || undefined,
     };
 
+    // 先掐掉上一轮还在途的 draft 流（重新生成 / 回跳再进都可能触发），
+    // 避免两条流并发交错写 draftMap + 服务端双落库
+    if (draftCtrl.current) {
+      try { draftCtrl.current.abort(); } catch {/* ignore */}
+    }
     const ctrl = new AbortController();
     draftCtrl.current = ctrl;
 
     // v3.5：只在 gather 已就绪时透给 draft；其余状态降级（critic 仍会按非素材包模式跑）
     const researchMaterialForDraft =
       gatherStatus === 'done' && gatherMaterial ? gatherMaterial : undefined;
+    const completedVersions: Partial<Record<PlatformKey, string>> = {};
+    if (isPartialRetry) {
+      for (const [platform, entry] of Object.entries(draftMap)) {
+        if (entry?.status === 'done' && entry.content_md) {
+          completedVersions[platform as PlatformKey] = entry.content_md;
+        }
+      }
+    }
 
     try {
       const resp = await fetch('/api/compose/draft', {
@@ -755,13 +1070,16 @@ export default function ComposePage() {
           composition,
           outline,
           target_platform: targetPlatform ?? undefined,
-          target_site_id: targetSiteId ?? undefined,
+          target_site_id: (!isPartialRetry || platforms[0] === main) ? targetSiteId ?? undefined : undefined,
           platforms,
+          existing_article_id: isPartialRetry ? articleId ?? undefined : undefined,
+          existing_versions: isPartialRetry ? completedVersions : undefined,
           research_material: researchMaterialForDraft,
         }),
       });
       if (!resp.body) { setDraftError('响应没有 body'); setDraftLoading(false); return; }
       const reader = resp.body.getReader();
+      let sawDone = false;
       for await (const evt of readSseEvents(reader)) {
         if (evt.event === 'open') {
           // 服务端确认的 platforms 可能与前端略不同（理论上不会，但稳一手）
@@ -939,6 +1257,7 @@ export default function ComposePage() {
           }
           setDraftLoading(false);
           setDraftDone(true);
+          sawDone = true;
         } else if (evt.event === 'error') {
           const d = evt.data as { platform?: PlatformKey; message?: string };
           if (d.platform) {
@@ -949,24 +1268,37 @@ export default function ComposePage() {
               [p]: {
                 status: 'error',
                 content_md: m[p]?.content_md ?? '',
-                error: d.message || '这一条卡住了',
+                error: d.message || '这一条没生成出来',
               },
             }));
           } else {
+            // 整体级错误是终结事件（服务端出这个就收流了）；单平台错误不算，后面平台还会继续
             setDraftError(d.message || '正文生成出了点状况');
             setDraftLoading(false);
+            sawDone = true;
           }
         }
       }
+      // 流正常关闭但没收到 done / 整体 error（比如 dev server 重启）：别让"生成中"永久卡死
+      if (!sawDone && draftCtrl.current === ctrl) {
+        setDraftError('连接断开了，可以点「重新生成」再来一次');
+        setDraftLoading(false);
+        settleUnfinishedDrafts('连接断开了，这一条没写完，点「重新生成」可以整批重来');
+      }
     } catch (e) {
+      // 已被新一轮接管：别动状态，让新一轮自己管
+      if (draftCtrl.current !== ctrl) return;
       if ((e as Error).name === 'AbortError') {
         setDraftError('已中止');
+        // 把没写完的平台状态一并收敛，避免 tab 还显示"流式中"、和顶部"已中止"打架
+        settleUnfinishedDrafts('这一条中止了，点「重新生成」可以整批重来');
       } else {
         setDraftError((e as Error).message);
+        settleUnfinishedDrafts('生成中断了，点「重新生成」可以整批重来');
       }
       setDraftLoading(false);
     }
-  }, [authors, customNotes, idea, outline, showToast, targetPlatform, targetSiteId, additionalPlatforms, gatherStatus, gatherMaterial]);
+  }, [authors, customNotes, idea, outline, showToast, targetPlatform, targetSiteId, additionalPlatforms, gatherStatus, gatherMaterial, settleUnfinishedDrafts, articleId, draftMap]);
 
   const stopDraft = useCallback(() => {
     draftCtrl.current?.abort();
@@ -982,21 +1314,42 @@ export default function ComposePage() {
   // Step 7：切平台 -> 优先读 refineMap（决策 4：Step 6 已经把多平台版本灌进来了）
   //         没命中再回退调 refine 兜底
   const refineForPlatform = useCallback(async (p: PlatformKey) => {
-    setPreviewPlatform(p);
     // 主平台原文：已经就是 draftMd；其它平台已在 refineMap 里：直接用
     if (p === (targetPlatform ?? 'wechat') || refineMap[p]) {
+      setPreviewPlatform(p);
       showToast(`已切换到 ${PLATFORM_TRAITS.find((x) => x.key === p)?.name}`);
+      return;
+    }
+    // 上一条改写还在流式中：先别再开一条，两条流的 loading 会互相打架
+    if (refineLoading) {
+      showToast('上一条改写还在路上，等它写完再切这个平台');
       return;
     }
     if (!draftMd) {
       showToast('还没有正文可改写');
       return;
     }
+    setPreviewPlatform(p);
+    // 半截稿清理工具：改写没走完（error / 中止 / 连接断开）时把该平台从 refineMap 摘掉，
+    // 否则残稿会被当成"已缓存成稿"，再点直接命中缓存永不重试
+    const dropPartial = () => {
+      setRefineMap((m) => {
+        const next = { ...m };
+        delete next[p];
+        return next;
+      });
+    };
+    if (refineCtrl.current) {
+      try { refineCtrl.current.abort(); } catch {/* ignore */}
+    }
+    const ctrl = new AbortController();
+    refineCtrl.current = ctrl;
     setRefineLoading(true);
     let acc = '';
     try {
       const resp = await fetch('/api/compose/refine', {
         method: 'POST',
+        signal: ctrl.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           content_md: draftMd,
@@ -1007,6 +1360,7 @@ export default function ComposePage() {
       });
       if (!resp.body) { showToast('改写失败：没有响应'); setRefineLoading(false); return; }
       const reader = resp.body.getReader();
+      let sawDone = false;
       for await (const evt of readSseEvents(reader)) {
         if (evt.event === 'chunk') {
           const t = (evt.data as { text?: string })?.text ?? '';
@@ -1020,17 +1374,29 @@ export default function ComposePage() {
           }
           setRefineLoading(false);
           showToast(`已按 ${PLATFORM_TRAITS.find((x) => x.key === p)?.name} 风格改写`);
+          sawDone = true;
         } else if (evt.event === 'error') {
           const d = evt.data as { message?: string };
+          dropPartial();
           showToast(d.message || '改写出错了');
           setRefineLoading(false);
+          sawDone = true;
         }
       }
+      // 流正常关闭但没收到终结事件（比如 dev server 重启）：清半截稿 + 收 loading
+      if (!sawDone && refineCtrl.current === ctrl) {
+        dropPartial();
+        setRefineLoading(false);
+        showToast('连接断开了，可以再点一次重试');
+      }
     } catch (e) {
-      showToast((e as Error).message);
+      // 已被新一轮接管：别动状态，让新一轮自己管
+      if (refineCtrl.current !== ctrl) return;
+      dropPartial();
       setRefineLoading(false);
+      if ((e as Error).name !== 'AbortError') showToast((e as Error).message);
     }
-  }, [draftMd, refineMap, showToast, targetPlatform, articleId]);
+  }, [draftMd, refineMap, refineLoading, showToast, targetPlatform, articleId]);
 
   // 当前预览用的 markdown
   const previewMd = useMemo(() => {
@@ -1041,17 +1407,24 @@ export default function ComposePage() {
   const previewWordCount = useMemo(() => countWords(previewMd), [previewMd]);
 
   // 导出
-  const onExport = useCallback((kind: ExportButton) => {
+  const onExport = useCallback(async (kind: ExportButton) => {
     if (!previewMd) { showToast('还没有正文可导出'); return; }
-    if (kind.mime === 'md') {
-      navigator.clipboard?.writeText(previewMd).catch(() => {});
-    } else if (kind.mime === 'html') {
-      navigator.clipboard?.writeText(previewHtml).catch(() => {});
-    } else if (kind.mime === 'txt') {
-      const txt = previewMd.replace(/[#>*`-]/g, '').replace(/\n{2,}/g, '\n\n');
-      navigator.clipboard?.writeText(txt).catch(() => {});
+    const name = safeExportName(previewMd);
+    try {
+      if (kind.format === 'md') {
+        downloadBlob(new Blob([previewMd], { type: 'text/markdown;charset=utf-8' }), `${name}.md`);
+      } else if (kind.format === 'html') {
+        const documentHtml = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${name}</title></head><body>${previewHtml}</body></html>`;
+        downloadBlob(new Blob([documentHtml], { type: 'text/html;charset=utf-8' }), `${name}-公众号.html`);
+      } else if (kind.format === 'txt') {
+        downloadBlob(new Blob([markdownToPlainText(previewMd)], { type: 'text/plain;charset=utf-8' }), `${name}.txt`);
+      } else {
+        await exportXhsLongImage(previewMd);
+      }
+      showToast(kind.toast);
+    } catch (error) {
+      showToast((error as Error).message || '导出时出了点状况');
     }
-    showToast(kind.toast);
   }, [previewMd, previewHtml, showToast]);
 
   // 推荐 stream 自动滚动（如果还在 streaming）
@@ -1090,7 +1463,13 @@ export default function ComposePage() {
       <main className="workbench">
         <Stepper current={step} onJump={(t) => {
           // 允许回退到已完成的步骤
-          if (t < step) setStep(t);
+          if (t < step) {
+            // 回跳先掐断所有在途流，避免旧流回来和新一轮交错（gather 是后台任务，不掐）
+            abortInflightStreams();
+            // 软等待中的 outline 一并取消，防止 gather 完成后在后台隐形触发 outline fetch
+            setOutlineWaitingForGather(false);
+            setStep(t);
+          }
         }} />
 
         {step === 1 && (
@@ -1251,7 +1630,8 @@ export default function ComposePage() {
             currentSectionIdx={currentSectionIdx}
             scrollRefs={draftScrollRefs}
             onStop={stopDraft}
-            onRetry={goDraft}
+            onRetry={() => { void goDraft(); }}
+            onRetryFailed={(platforms) => { void goDraft(platforms); }}
             onBack={() => setStep(5)}
             onNext={() => setStep(7)}
           />
@@ -1872,7 +2252,7 @@ function Step5Outline({
       )}
 
       {!loading && error && (
-        <Banner kind="error" title="大纲生成卡住了">
+        <Banner kind="error" title="大纲没生成出来">
           {error}
           <div style={{ marginTop: 10 }}>
             <button type="button" className="btn btn-secondary" onClick={onRetry}>
@@ -2042,7 +2422,7 @@ interface Step6DraftEntry {
 function Step6Draft({
   outline, platforms, mainPlatform, draftMap, activeTab, onActiveTabChange,
   loading, done, error, currentSectionIdx, scrollRefs,
-  onStop, onRetry, onBack, onNext,
+  onStop, onRetry, onRetryFailed, onBack, onNext,
 }: {
   outline: Outline | null;
   platforms: PlatformKey[];
@@ -2057,6 +2437,7 @@ function Step6Draft({
   scrollRefs: React.MutableRefObject<Partial<Record<PlatformKey, HTMLDivElement | null>>>;
   onStop: () => void;
   onRetry: () => void;
+  onRetryFailed: (platforms: PlatformKey[]) => void;
   onBack: () => void;
   onNext: () => void;
 }) {
@@ -2081,6 +2462,7 @@ function Step6Draft({
 
   // 顶部 status 文案：考虑多平台进度
   const doneCount = platforms.filter((p) => draftMap[p]?.status === 'done').length;
+  const failedPlatforms = platforms.filter((p) => draftMap[p]?.status === 'error');
   const statusText = (() => {
     if (!platforms.length) return '空闲';
     if (loading) {
@@ -2118,9 +2500,16 @@ function Step6Draft({
           </button>
         )}
         {!loading && (
-          <button type="button" className="btn btn-ghost" onClick={onRetry}>
-            <RetryIcon /> 重新生成
-          </button>
+          <>
+            {failedPlatforms.length > 0 && (
+              <button type="button" className="btn btn-primary" onClick={() => onRetryFailed(failedPlatforms)}>
+                <RetryIcon /> 仅重试失败的 {failedPlatforms.length} 个平台
+              </button>
+            )}
+            <button type="button" className="btn btn-ghost" onClick={onRetry}>
+              <RetryIcon /> 全部重新生成
+            </button>
+          </>
         )}
       </div>
 
@@ -2264,7 +2653,7 @@ function Step6Draft({
                 />
               )}
               {status === 'error' && entry?.error ? (
-                <Banner kind="error" title={`「${PLATFORM_TRAITS.find((x) => x.key === p)?.name ?? p}」这一条卡住了`}>
+                <Banner kind="error" title={`「${PLATFORM_TRAITS.find((x) => x.key === p)?.name ?? p}」这一条没生成出来`}>
                   {entry.error}
                 </Banner>
               ) : md ? (

@@ -20,6 +20,7 @@ import {
   runSingleCritic,
   type CriticRunRecord,
 } from '@/lib/critic';
+import { parseRefineVersions, type RefineVersionEntry } from '@/lib/refine-versions';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -51,6 +52,10 @@ interface IncomingPayload {
    * 由前端从 /api/compose/gather 拿到后透传过来；空 = 不注入。
    */
   research_material?: string;
+  /** 局部重试时复用原文章，避免每重试一个平台就新建一篇历史记录。 */
+  existing_article_id?: string;
+  /** 首次主平台失败、尚未落库时，局部重试携带先前已成功的版本一起入库。 */
+  existing_versions?: Record<string, string>;
 }
 
 interface SiteProfileRow {
@@ -61,8 +66,8 @@ interface SiteProfileRow {
 }
 
 const MIN_IDEA_CHARS = 30;
-/** 每个平台单独跑一次 streamClaude 的硬超时（4 分钟） */
-const PER_PLATFORM_TIMEOUT_MS = 240_000;
+/** 每个平台单独跑一次 streamClaude 的硬超时（8 分钟，适应 critic 循环） */
+const PER_PLATFORM_TIMEOUT_MS = 480_000;
 
 function jsonError(message: string, status = 400) {
   return new Response(JSON.stringify({ error: message }), {
@@ -310,6 +315,11 @@ export async function POST(req: NextRequest) {
       const maxAttempts = useCritic ? CRITIC_MAX_ATTEMPTS : 1;
       const runsForThisPlatform: CriticRunRecord[] = [];
       let lastDraftMd = '';
+      let lastDraftAttempt = 0;
+      // critic 在"最后一稿"上失败（超时/JSON 坏）→ 该稿按"未评估"处理：
+      // fail-open 直接用它落库，不让 best-of-N 拿更早的低分稿把它顶掉
+      // （否则用户刚看着流完的重写稿会被静默换回旧稿）
+      let lastDraftUnscored = false;
       let platformErrored = false;
 
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -360,6 +370,7 @@ export async function POST(req: NextRequest) {
 
         const contentMd = stripMarkdownFence(raw);
         lastDraftMd = contentMd;
+        lastDraftAttempt = attempt;
 
         // 没开 critic：直接落库走人
         if (!useCritic) break;
@@ -375,7 +386,9 @@ export async function POST(req: NextRequest) {
         );
 
         if (!critic.result) {
-          // critic 自己挂了——fail-open：把本稿当作"未评估"，跳出循环用原稿落库
+          // critic 自己挂了——fail-open：把本稿当作"未评估"，跳出循环用本稿落库。
+          // 标记 lastDraftUnscored，禁止下面的 best-of-N 用更早的低分稿把本稿顶掉。
+          lastDraftUnscored = true;
           send('critic_error', {
             platform,
             attempt,
@@ -413,13 +426,17 @@ export async function POST(req: NextRequest) {
 
       if (platformErrored) {
         if (abortSignal.aborted) break;
-        continue;
+        // 重写轮失败（超时/模型错误）但前面已有评过分的稿 → 不整平台作废，
+        // 落 best-of-N 兜底（否则 attempt 1 那篇用户已经看着流完的好稿会凭空消失）。
+        // 一稿都没有才真正跳过该平台。
+        if (runsForThisPlatform.length === 0) continue;
       }
 
-      // Best-of-N 兜底：critic 用完次数仍没过阈值时，挑总分最高的那稿落库
+      // Best-of-N 兜底：critic 用完次数仍没过阈值时，挑总分最高的那稿落库。
+      // lastDraftUnscored=true（critic 在最后一稿上挂了）时跳过——fail-open 用本稿。
       let finalContentMd = lastDraftMd;
-      let finalAttempt = runsForThisPlatform.length;
-      if (useCritic && runsForThisPlatform.length > 0) {
+      let finalAttempt = lastDraftAttempt;
+      if (useCritic && runsForThisPlatform.length > 0 && !lastDraftUnscored) {
         const lastRun = runsForThisPlatform[runsForThisPlatform.length - 1];
         if (!lastRun.result.passed) {
           const best = pickBestRun(runsForThisPlatform);
@@ -457,17 +474,65 @@ export async function POST(req: NextRequest) {
     try {
       if (mainContent) {
         const db = getDb();
-        articleId = nanoid(14);
         const now = Date.now();
         const primaryFpId = composition.selected_authors[0]?.fingerprint_id ?? null;
         finalTitle =
           body.title?.trim() || extractTitleFromMarkdown(mainContent) || outline.working_title;
         const mainHtml = markdownToHtml(mainContent);
 
+        const existingArticleId = body.existing_article_id?.trim() || null;
+        const existing = existingArticleId
+          ? db.prepare(`SELECT id, platform_target, created_at, refine_versions_json FROM articles WHERE id = ?`)
+              .get(existingArticleId) as {
+                id: string;
+                platform_target: string;
+                created_at: number;
+                refine_versions_json: string | null;
+              } | undefined
+          : undefined;
+
+        if (existing) {
+          articleId = existing.id;
+          const versions = parseRefineVersions(existing.refine_versions_json, {
+            fallbackTs: existing.created_at,
+            mainPlatform: existing.platform_target,
+          });
+          for (const [platform, content] of perPlatformContent.entries()) {
+            if (platform === existing.platform_target) {
+              db.prepare(
+                `UPDATE articles SET title = ?, content_md = ?, content_html = ? WHERE id = ?`,
+              ).run(
+                body.title?.trim() || extractTitleFromMarkdown(content) || finalTitle,
+                content,
+                markdownToHtml(content),
+                articleId,
+              );
+              continue;
+            }
+            const index = versions.findIndex((entry) => entry.target_platform === platform);
+            const replacement: RefineVersionEntry = {
+              ts: now,
+              source_platform: existing.platform_target as PlatformKey,
+              target_platform: platform,
+              content_md: content,
+            };
+            if (index >= 0) versions[index] = replacement;
+            else versions.push(replacement);
+          }
+          db.prepare(`UPDATE articles SET refine_versions_json = ? WHERE id = ?`)
+            .run(JSON.stringify(versions), articleId);
+        } else {
+          articleId = nanoid(14);
+
         // 其它平台收成 dict（决策 4）：{ [platform]: md }
         // 用 dict 形态而不是 refine route 的 append 数组，因为本任务是"一次出 N 版"，
         // 同一平台不会出现多版，dict 是更合适的容器。Step 7 读 refineMap 走内存，不读这列。
         const otherVersions: Record<string, string> = {};
+        if (body.existing_versions && typeof body.existing_versions === 'object') {
+          for (const [pk, md] of Object.entries(body.existing_versions)) {
+            if (pk !== mainPlatformKey && typeof md === 'string' && md.trim()) otherVersions[pk] = md;
+          }
+        }
         for (const [pk, md] of perPlatformContent.entries()) {
           if (pk === mainPlatformKey) continue;
           otherVersions[pk] = md;
@@ -476,32 +541,33 @@ export async function POST(req: NextRequest) {
           ? JSON.stringify(otherVersions)
           : null;
 
-        db.prepare(
-          `INSERT INTO articles
+          db.prepare(
+            `INSERT INTO articles
             (id, fingerprint_id, platform_target, layout_theme, title, content_md, content_html,
              user_prompt, created_at, composition_json, outline_json, idea, refine_versions_json)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          articleId,
-          primaryFpId,
-          mainPlatformKey,
-          'standard',
-          finalTitle,
-          mainContent,
-          mainHtml,
-          idea,
-          now,
-          JSON.stringify(composition),
-          JSON.stringify(outline),
-          idea,
-          refineVersionsJson,
-        );
+          ).run(
+            articleId,            // id
+            primaryFpId,          // fingerprint_id
+            mainPlatformKey,      // platform_target
+            'standard',           // layout_theme
+            finalTitle,           // title
+            mainContent,          // content_md
+            mainHtml,             // content_html
+            idea,                 // user_prompt (对应 idea 作为用户输入)
+            now,                  // created_at
+            JSON.stringify(composition),  // composition_json
+            JSON.stringify(outline),      // outline_json
+            idea,                         // idea
+            refineVersionsJson,           // refine_versions_json
+          );
 
-        const upFp = db.prepare(`UPDATE fingerprints SET hit_count = hit_count + 1 WHERE id = ?`);
-        const upAuthor = db.prepare(`UPDATE authors SET last_used_at = ? WHERE id = ?`);
-        for (const sel of composition.selected_authors) {
-          try { upFp.run(sel.fingerprint_id); } catch {/* ignore */}
-          try { upAuthor.run(now, sel.author_id); } catch {/* ignore */}
+          const upFp = db.prepare(`UPDATE fingerprints SET hit_count = hit_count + 1 WHERE id = ?`);
+          const upAuthor = db.prepare(`UPDATE authors SET last_used_at = ? WHERE id = ?`);
+          for (const sel of composition.selected_authors) {
+            try { upFp.run(sel.fingerprint_id); } catch {/* ignore */}
+            try { upAuthor.run(now, sel.author_id); } catch {/* ignore */}
+          }
         }
 
         // v3.4 · critic 评分入库（每平台每次 attempt 一行）
@@ -570,11 +636,16 @@ export async function POST(req: NextRequest) {
         // 主平台失败的极端情况：不落库，让前端拿到 error 自己处理
       }
     } catch (err) {
+      console.error('[draft] 数据库入库失败:', err);
+      console.error('[draft] 错误详情:', (err as Error).message);
+      console.error('[draft] 错误堆栈:', (err as Error).stack);
       send('error', {
         message: '文章写完了，但本地数据库没接住。原文已经在内存里，复制保留一下',
         phase: 'db',
         detail: (err as Error).message,
       });
+      // 注意：发送 error 后不应该再发送 done，否则前端会混乱
+      return;
     }
 
     // ---- 统一 done（决策 5）----

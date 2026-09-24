@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS crawled_articles (
   source_type TEXT NOT NULL,
   used_in_fingerprint_id TEXT,
   crawled_at INTEGER NOT NULL,
+  publish_time TEXT,
   -- Agent I 增：内容载体 text / video / mixed；ALTER 添加见 lib/db.ts。
   medium TEXT DEFAULT 'text'
 );

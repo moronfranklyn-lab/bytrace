@@ -37,7 +37,7 @@
 - `/sites`、`/sites/new`、`/authors/[id]` 由 Agent F 实现，build 通过且 200，未我亲自数据填充
 - 真实 URL 端到端：少数派文章页是 SPA 渲染，crawler `parse-failed` 是预期行为；URL 模式整条链路在 `/api/crawl-preview` + v2 route 的代码层验证过；端到端的真粘是用 paste 模式跑的 5 篇
 
-## 给楠的验收清单（按顺序点）
+## 给Ethan的验收清单（按顺序点）
 
 1. `cd autoarticle && PORT=3100 npm run dev`
 2. 浏览器开 `http://localhost:3100/` → 看到 hero + 两张博主指纹（半佛仙人测试 + Agent H 测试博主）

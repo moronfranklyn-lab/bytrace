@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import { nanoid } from 'nanoid';
 import { createHash } from 'node:crypto';
 import { getDb } from '@/lib/db';
-import { hashUrl } from '@/lib/crawler';
+import { crawlAuthorIndex, hashUrl, isCrawlError } from '@/lib/crawler';
 import {
   prepareSampleArticle,
   runV3Extraction,
@@ -36,6 +36,8 @@ export const dynamic = 'force-dynamic';
 
 interface ReqBody {
   articles?: IncomingArticleInput[];
+  /** 作者主页 / 专栏 / 板块 URL：自动扒文章列表后追加到 articles。 */
+  author_url?: string;
   /** v3.3：不加样本、只用现有库重跑（升级 prompt 后回填新字段用） */
   force_rerun?: boolean;
 }
@@ -61,6 +63,21 @@ function sampleHash(p: { url?: string | null; content: string }): string {
   return 'paste:' + createHash('sha1').update(p.content.slice(0, 200)).digest('hex').slice(0, 16);
 }
 
+function inferPlatformFromUrl(url: string): string {
+  try {
+    const h = new URL(url).hostname;
+    if (/zhihu\.com$/i.test(h)) return 'zhihu';
+    if (/sspai\.com$/i.test(h)) return 'sspai';
+    if (/uisdc\.com$/i.test(h)) return 'uisdc';
+    if (/woshipm\.com$/i.test(h)) return 'wechat';
+    if (/(bilibili\.com|b23\.tv)$/i.test(h)) return 'bilibili';
+    if (/(youtube\.com|youtu\.be)$/i.test(h)) return 'youtube';
+    if (/xiaohongshu\.com$/i.test(h)) return 'xhs';
+    if (/douyin\.com$/i.test(h)) return 'douyin';
+  } catch {/* ignore */}
+  return 'wechat';
+}
+
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
@@ -74,10 +91,11 @@ export async function PATCH(
   } catch {
     return jsonError('请求体不是合法 JSON');
   }
-  const incoming = Array.isArray(body.articles) ? body.articles : [];
+  const incomingFromBody = Array.isArray(body.articles) ? body.articles : [];
+  const authorUrl = (body.author_url ?? '').trim();
   const forceRerun = body.force_rerun === true;
-  if (incoming.length === 0 && !forceRerun) {
-    return jsonError('articles 不能为空（或设置 force_rerun: true 不加样本只重跑）');
+  if (incomingFromBody.length === 0 && !authorUrl && !forceRerun) {
+    return jsonError('articles 不能为空；也可以传 author_url 自动扒作者文章，或设置 force_rerun: true 不加样本只重跑');
   }
 
   const db = getDb();
@@ -102,6 +120,24 @@ export async function PATCH(
         .all(id) as { url_hash: string }[]
     ).map((r) => r.url_hash),
   );
+
+  let incoming = incomingFromBody;
+  if (authorUrl) {
+    const index = await crawlAuthorIndex(authorUrl, {
+      skipHashes: existingHashes,
+      maxArticles: MAX_ARTICLES,
+      maxPages: 10,
+    });
+    if (isCrawlError(index)) {
+      return jsonError(`自动扒作者文章失败：${index.message}`, 502);
+    }
+    const scrapedArticles: IncomingArticleInput[] = index.article_urls.map((url) => ({
+      mode: 'url' as const,
+      url,
+      platform: inferPlatformFromUrl(url),
+    }));
+    incoming = [...incomingFromBody, ...scrapedArticles];
+  }
 
   // 逐篇 prepare（带 URL 抓取）+ 即时去重
   const newlyPrepared: PreparedArticle[] = [];
@@ -188,12 +224,13 @@ export async function PATCH(
   // 取累计样本（最近 20 篇）重提炼
   const historyRows = db
     .prepare(
-      `SELECT url, title, content, platform, medium, domain, source_mode,
+      `SELECT url_hash, url, title, content, platform, medium, domain, source_mode,
               primary_category, secondary_category, category_confidence
        FROM fingerprint_articles WHERE fingerprint_id = ?
        ORDER BY added_at DESC LIMIT ?`,
     )
     .all(id, MAX_ARTICLES) as Array<{
+      url_hash: string;
       url: string | null;
       title: string | null;
       content: string;
@@ -277,6 +314,7 @@ export async function PATCH(
     chars: p.content.length,
   }));
 
+  const checkFpExists = db.prepare(`SELECT id FROM fingerprints WHERE id = ?`);
   const updateFp = db.prepare(
     `UPDATE fingerprints SET
        source_articles_json = ?,
@@ -289,8 +327,15 @@ export async function PATCH(
        domain_variations_json = ?,
        cross_platform_report_json = ?,
        strategy_fragments_json = ?,
-       iteration_count = ?
+       iteration_count = COALESCE(iteration_count, 1) + 1
      WHERE id = ?`,
+  );
+  // Stage 0 重跑出的分类回写样本行：不回写的话每次重提炼都会对同一批
+  // 老样本重复烧 Stage 0，UI 上的类别分布也对不上
+  const updateSampleCategory = db.prepare(
+    `UPDATE fingerprint_articles SET
+       primary_category = ?, secondary_category = ?, category_confidence = ?
+     WHERE fingerprint_id = ? AND url_hash = ?`,
   );
   const deleteStrategies = db.prepare(`DELETE FROM strategies WHERE fingerprint_id = ?`);
   const insertStrategy = db.prepare(
@@ -299,16 +344,21 @@ export async function PATCH(
        created_at, platform_scope_json, domain_scope_json, why_works, title)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
-  const deleteCategoryProfiles = db.prepare(
-    `DELETE FROM fingerprint_category_profiles WHERE fingerprint_id = ?`,
-  );
+  // 类别配方只 REPLACE 本次成功合成的类（PK = fingerprint_id + category）。
+  // 不做无条件全删：runCategoryProfiles 单类失败会静默跳过，全删再插会把
+  // 失败 / 本轮没跑的类别的既有配方清空。
   const insertCategoryProfile = db.prepare(
     `INSERT OR REPLACE INTO fingerprint_category_profiles
       (fingerprint_id, category, profile_json, sample_count, iteration, updated_at)
      VALUES (?, ?, ?, ?, ?, ?)`,
   );
-  const deleteFragmentIndexed = db.prepare(
-    `DELETE FROM strategy_fragments_indexed WHERE fingerprint_id = ?`,
+  // 碎片索引同理：全局碎片（category IS NULL）整组覆盖，
+  // 类别碎片只删本次成功合成的类，其余类保留旧行
+  const deleteGlobalFragments = db.prepare(
+    `DELETE FROM strategy_fragments_indexed WHERE fingerprint_id = ? AND category IS NULL`,
+  );
+  const deleteCategoryFragments = db.prepare(
+    `DELETE FROM strategy_fragments_indexed WHERE fingerprint_id = ? AND category = ?`,
   );
   const insertFragmentIndexed = db.prepare(
     `INSERT INTO strategy_fragments_indexed
@@ -319,6 +369,11 @@ export async function PATCH(
   );
 
   const tx = db.transaction(() => {
+    // 复核指纹还在：重提炼要跑好几分钟，期间可能被列表页快捷删除。
+    // 不复核就写会裸 500，早插入的样本还会变孤儿行。
+    if (!checkFpExists.get(id)) {
+      throw new Error('这份指纹在重提炼期间被删掉了，这次的结果就不写回了');
+    }
     updateFp.run(
       JSON.stringify(sourceArticlesSummary),
       JSON.stringify(result.fingerprint),
@@ -329,12 +384,26 @@ export async function PATCH(
       domainVariations ? JSON.stringify(domainVariations) : null,
       crossPlatformReport ? JSON.stringify(crossPlatformReport) : null,
       strategyFragments.length ? JSON.stringify(strategyFragments) : null,
-      nextIteration,
       id,
     );
+    // Stage 0 重跑给老样本补出的分类写回 DB（allPrepared 与 historyRows 按下标一一对应）
+    for (let i = 0; i < historyRows.length; i++) {
+      const p = allPrepared[i];
+      if (!historyRows[i].primary_category && p.primary_category) {
+        updateSampleCategory.run(
+          p.primary_category,
+          p.secondary_category ?? null,
+          p.category_confidence ?? null,
+          id,
+          historyRows[i].url_hash,
+        );
+      }
+    }
     deleteStrategies.run(id);
-    deleteCategoryProfiles.run(id);
-    deleteFragmentIndexed.run(id);
+    deleteGlobalFragments.run(id);
+    for (const cp of categoryProfiles) {
+      deleteCategoryFragments.run(id, cp.category);
+    }
     const stratNow = Date.now();
     for (const s of strategyFragments) {
       insertStrategy.run(
@@ -404,7 +473,17 @@ export async function PATCH(
       }
     }
   });
-  tx();
+  try {
+    tx();
+  } catch (txErr) {
+    return Response.json(
+      {
+        reextracted: false,
+        error: `重提炼结果没能写回：${(txErr as Error).message}。如果是指纹刚被删掉，重新拆解一次就好。`,
+      },
+      { status: 409 },
+    );
+  }
 
   return Response.json({
     newly_added_count: newlyPrepared.length,
@@ -469,6 +548,11 @@ export async function DELETE(
       .prepare(`SELECT COUNT(*) AS n FROM fingerprints WHERE author_id = ?`)
       .get(fp.author_id) as { n: number };
     if (remaining.n === 0) {
+      // crawled_articles.author_id 带 ON DELETE CASCADE，直接删 author 会把
+      // 该博主的语料一并级联删光——那是热点聚合的输入。先解绑再删。
+      db.prepare(`UPDATE crawled_articles SET author_id = NULL WHERE author_id = ?`).run(
+        fp.author_id,
+      );
       db.prepare(`DELETE FROM authors WHERE id = ?`).run(fp.author_id);
     }
   });

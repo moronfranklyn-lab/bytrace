@@ -57,10 +57,10 @@ export const PLATFORMS: PlatformTrait[] = [
     key: 'wechat',
     name: '公众号',
     tone_tag: '深度',
-    word_range_min: 2000,
-    word_range_max: 4500,
+    word_range_min: 1500,
+    word_range_max: 2500,
     voice: '深度长文 · 半正式 · 段落松弛 · 适度金句',
-    structure: '主标题 + 5-8 个二级标题 + 升华收尾',
+    structure: '主标题 + 3-5 个二级标题 + 升华收尾',
     hook_position: '开篇 200 字内立钩，正文 1/3 处给反转或第二钩',
     pacing: '节奏中等偏慢，段落 4-6 行，允许铺垫',
     do_extra: [
@@ -72,7 +72,7 @@ export const PLATFORMS: PlatformTrait[] = [
       '不要堆砌外链',
       '不要在正文里放"点赞在看转发"这类运营话术',
     ],
-    ui_hint: '2000-4500 字 · 深度长文',
+    ui_hint: '1500-2500 字 · 中等深度',
   },
   {
     key: 'zhihu',
@@ -259,6 +259,33 @@ export function getPlatform(key: string | null | undefined): PlatformTrait {
 
 export function isValidPlatformKey(v: string): v is PlatformKey {
   return PLATFORMS.some((p) => p.key === v) || HIDDEN_PLATFORMS.some((p) => p.key === v);
+}
+
+/**
+ * 老数据里 articles.platform_target 可能存的是中文名（'公众号' / '知乎'...），
+ * 新数据是英文 PlatformKey。这里统一解析：英文 key 直接命中，中文名走映射，
+ * 都不是返回 null。/articles 列表页和 diff route 共用，别再各写一份。
+ */
+const CN_TO_KEY: Record<string, PlatformKey> = {
+  '公众号': 'wechat',
+  '知乎': 'zhihu',
+  '少数派': 'sspai',
+  '优设': 'uisdc',
+  '小红书': 'xhs',
+  'B站': 'bilibili',
+  'B 站': 'bilibili',
+  '抖音': 'douyin',
+  'YouTube': 'youtube',
+  '自定义': 'custom',
+};
+
+export function resolvePlatformKey(raw: string | null | undefined): PlatformKey | null {
+  if (!raw) return null;
+  const k = raw.trim();
+  // 直接命中英文 key
+  if (isValidPlatformKey(k)) return k as PlatformKey;
+  // 兼容旧数据里可能存的中文名（少量历史记录）
+  return CN_TO_KEY[k] ?? null;
 }
 
 /**

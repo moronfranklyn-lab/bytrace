@@ -57,6 +57,21 @@ function formatDate(ts: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+function displayPlatform(raw: string, sourceUrls: string[] = []): string {
+  if (sourceUrls.some((u) => /(^|\.)woshipm\.com\//i.test(u))) return '人人都是产品经理';
+  const map: Record<string, string> = {
+    wechat: '公众号',
+    xhs: '小红书',
+    zhihu: '知乎',
+    sspai: '少数派',
+    uisdc: '优设',
+    bilibili: 'B 站',
+    youtube: 'YouTube',
+    douyin: '抖音',
+  };
+  return map[raw] ?? raw;
+}
+
 /**
  * /authors/[id] —— 博主详情页（K 第三轮重做）
  *
@@ -128,7 +143,7 @@ export default async function AuthorDetailPage({ params }: PageProps) {
   const platformStudiedCount: Record<string, number> = {};
   for (const art of articleRows) {
     if (!art.used_in_fingerprint_id) continue;
-    const p = art.platform || author.platform || '未指定';
+    const p = displayPlatform(art.platform || author.platform || '未指定', [art.url]);
     platformStudiedCount[p] = (platformStudiedCount[p] ?? 0) + 1;
   }
 
@@ -146,11 +161,17 @@ export default async function AuthorDetailPage({ params }: PageProps) {
 
   const avatarChar = author.avatar_emoji || author.name.slice(0, 1).toUpperCase();
 
-  // 顶部 chip 显示的平台清单：v3 用 platforms_analyzed，否则用 author.platform
+  const fingerprintSourceUrls = (
+    db
+      .prepare(`SELECT url FROM fingerprint_articles WHERE fingerprint_id = ? AND url IS NOT NULL`)
+      .all(latestFp.id) as { url: string }[]
+  ).map((r) => r.url);
+
+  // 顶部 chip 显示的平台/来源清单：v3 用 platforms_analyzed，否则用 author.platform；woshipm 显示为人人都是产品经理。
   const platformsChip =
     isV3 && Array.isArray(fp.platforms_analyzed) && fp.platforms_analyzed.length > 0
-      ? fp.platforms_analyzed
-      : [author.platform || '未指定'];
+      ? fp.platforms_analyzed.map((p) => displayPlatform(String(p), fingerprintSourceUrls))
+      : [displayPlatform(author.platform || '未指定', fingerprintSourceUrls)];
 
   return (
     <>
@@ -180,7 +201,7 @@ export default async function AuthorDetailPage({ params }: PageProps) {
                 指纹 v{latestFp.version ?? 1}
               </span>
               <span className="meta-sep">·</span>
-              <span>建于 {formatDate(author.created_at)}</span>
+              <span>更新于 {formatDate(latestFp.created_at)}</span>
             </div>
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
@@ -207,7 +228,7 @@ export default async function AuthorDetailPage({ params }: PageProps) {
           fingerprint={fp}
           fingerprintId={latestFp.id}
           platformStudiedCount={platformStudiedCount}
-          fallbackPlatform={author.platform || '未指定'}
+          fallbackPlatform={platformsChip[0] || '未指定'}
           totalStudied={totalStudied}
         />
       </main>

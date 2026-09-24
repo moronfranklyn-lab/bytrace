@@ -39,8 +39,8 @@ import {
 import type { Composition, FingerprintMeta } from '@/lib/composition';
 import type { Outline } from '@/lib/prompts/outline';
 
-/** Critic 单次调用的硬超时（毫秒） */
-const CRITIC_TIMEOUT_MS = 90_000;
+/** Critic 单次调用的硬超时（毫秒）- 增加到 120 秒以适应公众号长文 */
+const CRITIC_TIMEOUT_MS = 120_000;
 
 /** 一次 Critic 评分的完整记录（用于 SSE 上行 + 落库） */
 export interface CriticRunRecord {

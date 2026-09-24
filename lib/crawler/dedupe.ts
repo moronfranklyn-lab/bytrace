@@ -1,6 +1,9 @@
 import crypto from 'node:crypto';
 
-const TRACKING_PARAM_RE = /^(utm_|spm$|share_|from$|src$|ref$|fr$)/i;
+// 追踪参数白名单：utm_* / spm / share_* 通用；chksm / scene / srcid / sharer_* 是公众号分享参数；
+// spm_id_from / vd_source 是 B 站分享参数；xtrack 是小红书 / 通用埋点参数
+const TRACKING_PARAM_RE =
+  /^(utm_|spm$|share_|from$|src$|ref$|fr$|chksm$|scene$|srcid$|sharer_|spm_id_from$|vd_source$|xtrack$)/i;
 
 /**
  * 标准化 URL：lower-case host、去 fragment、去 tracking 参数。

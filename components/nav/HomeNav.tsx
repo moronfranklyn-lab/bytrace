@@ -3,7 +3,6 @@
 import Link from 'next/link';
 import { useState } from 'react';
 import { ThemeSwitcher } from '@/components/theme/ThemeSwitcher';
-import { ApifyStatusPill } from '@/components/nav/ApifyStatusPill';
 
 interface HomeNavProps {
   activePath?: string;
@@ -15,7 +14,6 @@ const LINKS: Array<{ href: string; label: string; match: string }> = [
   { href: '/sites', label: '站点画像', match: '/sites' },
   { href: '/recipes', label: '风格配方', match: '/recipes' },
   { href: '/topics', label: '选题中心', match: '/topics' },
-  { href: '/research', label: '深度调研', match: '/research' },
   { href: '/articles', label: '历史文章', match: '/articles' },
 ];
 
@@ -44,9 +42,6 @@ export function HomeNav({ activePath = '/' }: HomeNavProps) {
               {l.label}
             </Link>
           ))}
-          <div style={{ marginLeft: 8 }}>
-            <ApifyStatusPill />
-          </div>
           <div style={{ marginLeft: 8 }}>
             <ThemeSwitcher />
           </div>

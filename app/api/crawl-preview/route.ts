@@ -121,9 +121,6 @@ export async function POST(req: NextRequest) {
         url: result.url,
         url_hash: result.url_hash,
         medium: result.medium ?? 'text',
-        // 走 Apify 时附带本次成本，前端 toast 可显示「本次消耗 $X」
-        apify_cost_usd: result.apify_cost_usd ?? null,
-        apify_platform: result.apify_platform ?? null,
         auto_detected_kind: autoDetected,
       }),
       {

@@ -34,36 +34,32 @@ export function buildImageKeywordsPrompt(
 ${styleLine}
 
 严格输出规则：
-- 只输出一个 \`\`\`json ... \`\`\` 代码块，前后没有任何解释或寒暄。
-- JSON 是合法 JSON，字符串用双引号。
-- 选位置的原则：每张图都服务于"读者读到这一段时眼睛需要休息一下/需要画面补充"，不要扎堆在开头。
-- position_anchor 是该图**应该插在哪段后面**的那段段落的开头约 30 个汉字（去掉空白），后端会用它做定位。**必须从原文中精确截取**，不要改写。
-- intent_zh 是 6-12 字的中文图意，例如"安静的书桌 · 牛皮纸笔记本"。
-- intent_en 是 3-6 个英文关键词，逗号分隔，例如 "quiet desk, notebook, paper texture, warm light"。后端会直接拿去搜 Unsplash。
-- caption 是会显示在图片下方的中文图说，10-18 字。
+- **只输出 JSON，不要有任何其他文字**
+- **不要用 markdown 代码块包裹（不要 \`\`\`json），直接输出裸 JSON**
+- JSON 必须是合法 JSON 格式，所有字符串用双引号
+- position_anchor：从原文精确截取段落开头 **20 个汉字**（不是 30，要短）
+- intent_zh：6-10 字的中文图意，例如"机器人展台"
+- intent_en：3-5 个英文关键词，例如 "robot, exhibition, technology"
+- caption：10-15 字的中文图说
 
-JSON Schema：
+输出格式（slots 数组必须正好有 ${n} 个元素）：
 
-\`\`\`json
 {
   "slots": [
     {
       "slot_index": 1,
-      "position_anchor": "原文那段开头的 30 字（必须能在文章里找到）",
-      "intent_zh": "中文图意 6-12 字",
-      "intent_en": "english, keywords, comma, separated",
-      "caption": "中文图说 10-18 字"
+      "position_anchor": "原文段落开头20字",
+      "intent_zh": "中文图意6-10字",
+      "intent_en": "english, keywords",
+      "caption": "中文图说10-15字"
     }
   ]
 }
-\`\`\`
-
-slots 数组必须正好有 ${n} 个元素，slot_index 从 1 递增。
 
 ===== 文章正文 =====
 ${content}
 
-现在输出 JSON。只输出一个 \`\`\`json ... \`\`\` 代码块。`;
+现在输出 JSON（直接输出裸 JSON，不要任何其他内容）：`;
 }
 
 /**

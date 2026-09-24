@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 export interface ImageSearchHit {
   source: 'local' | 'unsplash';
   id: string;
-  preview_url: string;       // local: file:// path or /api stream; unsplash: thumb
+  preview_url: string;       // local: /api/assets/file 流式端点; unsplash: thumb
   full_url: string;          // article-body sized
   alt: string | null;
   caption: string | null;
@@ -17,13 +17,13 @@ export interface ImageSearchHit {
 }
 
 function localAssetToHit(a: LocalAsset): ImageSearchHit {
-  // 本地文件没法直接用 file:// — 浏览器会拒。前端会把 file_path 用 /api/assets/file
-  // 流出去；此处先返回原 absolute path，前端组件自己加 prefix。
+  // 本地文件浏览器加载不了磁盘绝对路径，与 images/auto 对齐：
+  // 走 /api/assets/file?id=... 流出
   return {
     source: 'local',
     id: a.id,
-    preview_url: a.file_path,
-    full_url: a.file_path,
+    preview_url: `/api/assets/file?id=${encodeURIComponent(a.id)}`,
+    full_url: `/api/assets/file?id=${encodeURIComponent(a.id)}`,
     alt: a.file_name,
     caption: a.tags.join(' · ') || null,
     author: null,

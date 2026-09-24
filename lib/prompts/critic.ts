@@ -16,6 +16,7 @@
 
 import type { Composition, FingerprintMeta } from '@/lib/composition';
 import type { Outline } from '@/lib/prompts/outline';
+import { XIAOPU_CRITIC_RULES } from '@/lib/prompts/xiaopu-writing';
 
 /** Critic 评分维度。和 critic prompt + critic_runs 表列名一一对应。 */
 export type CriticDimension =
@@ -69,6 +70,7 @@ export function buildCriticPrompt(
 
 你**不是**编辑，**不要**改写文章；你只输出评分 JSON。
 
+${XIAOPU_CRITIC_RULES}
 # 博主指纹要求（评分依据，最高优先级）
 
 ${fpBlock}
@@ -104,15 +106,15 @@ ${articleMd}
 - 0 分：完全没有类比，纯抽象论述。
 
 **punchline（金句段，0-5）**
-- 5 分：至少有 2 个独立成段的"对仗 / 结论 / 反差"短句，能被读者截图传播。
+- 5 分：至少有 2 个独立成段的"对仗 / 结论 / 反差"短句，且没有超过正文证据力度，能被读者截图传播。
 - 3 分：有 1 个能用的短句。
-- 1 分：通篇没有段落级金句。
-- 0 分：纯散文。
+- 1 分：通篇没有段落级判断句，或全是空泛金句。
+- 0 分：纯散文或强行升华。
 
 **taboo（禁忌项，0-5）**
-- 5 分：0 个 emoji；0 个装饰符号（✦ ✨ ─ ▎ ★ 之类）；没有"在这个数字化时代""随着 AI 的飞速发展"这类万能开场；没有大量空泛形容词堆砌。
-- 3 分：偶有 1 处装饰符号或万能套话。
-- 0 分：多处 emoji / 套话 / 平庸排比。
+- 5 分：0 个 emoji；0 个装饰符号（✦ ✨ ─ ▎ ★ 之类）；没有"在这个数字化时代""随着 AI 的飞速发展"这类万能开场；没有大量空泛形容词堆砌；没有编造第一人称经历或实测结果。
+- 3 分：偶有 1 处装饰符号、万能套话或证据边界不清。
+- 0 分：多处 emoji / 套话 / 平庸排比 / 未经证实的"我测了"。
 
 # 输出格式（必须是合法 JSON，不要任何前后铺垫）
 

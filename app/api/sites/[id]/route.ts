@@ -9,7 +9,9 @@ import {
   loadHistorySamples,
   runProfileExtraction,
   MAX_ARTICLES_FOR_PROFILE,
+  MAX_NEW_ARTICLES_PER_PATCH,
   MIN_ARTICLES_FOR_PROFILE,
+  RECENT_ARTICLE_WINDOW_DAYS,
 } from '@/lib/sites/profile-engine';
 
 export const runtime = 'nodejs';
@@ -170,7 +172,8 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     );
     const index = await crawlAuthorIndex(site.source_url, {
       skipHashes: existingHashes,
-      maxArticles: MAX_ARTICLES_FOR_PROFILE,
+      maxArticles: MAX_NEW_ARTICLES_PER_PATCH,
+      maxPages: 10,
     });
     if (isCrawlError(index)) {
       return jsonError(
@@ -194,7 +197,8 @@ export async function PATCH(req: NextRequest, { params }: Params) {
       id,
       candidateUrls,
       nextIteration,
-      MAX_ARTICLES_FOR_PROFILE,
+      MAX_NEW_ARTICLES_PER_PATCH,
+      mode === 'recrawl' ? { recentDays: RECENT_ARTICLE_WINDOW_DAYS } : {},
     );
   } catch (err) {
     return jsonError(`爬文章失败：${(err as Error).message}`, 502);
@@ -211,6 +215,8 @@ export async function PATCH(req: NextRequest, { params }: Params) {
       skipped_samples: fetchResult.skipped_duplicate.slice(0, 8),
       failed: fetchResult.failed.slice(0, 8),
       total_samples: totalSamples.n,
+      recent_days_window: RECENT_ARTICLE_WINDOW_DAYS,
+      max_new_per_round: MAX_NEW_ARTICLES_PER_PATCH,
       profile: null,
       reextracted: false,
       message:
@@ -290,6 +296,13 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     failed: fetchResult.failed.slice(0, 8),
     total_samples: totalCount,
     used_for_extraction: allSamples.length,
+    recent_days_window: RECENT_ARTICLE_WINDOW_DAYS,
+    max_new_per_round: MAX_NEW_ARTICLES_PER_PATCH,
+    newly_added: fetchResult.newly_added.map((a) => ({ 
+      title: a.title ?? null,
+      url: a.url,
+      publish_time: a.publish_time ?? null,
+    })),
     iteration: nextIteration,
     profile,
     reextracted: true,

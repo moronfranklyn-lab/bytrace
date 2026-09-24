@@ -199,6 +199,7 @@ export async function POST(req: NextRequest) {
     fetchResult = await fetchArticlesWithDedupe(id, candidateUrls, 1);
   } catch (err) {
     db.prepare(`DELETE FROM sites WHERE id = ?`).run(id);
+    db.prepare(`DELETE FROM site_articles WHERE site_id = ?`).run(id);
     return jsonError(`爬文章失败：${(err as Error).message}`, 502);
   }
 

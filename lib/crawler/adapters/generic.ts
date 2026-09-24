@@ -29,6 +29,19 @@ export async function crawlGeneric(url: URL): Promise<CrawledArticle | CrawlErro
   return parseGenericHtml(url, html);
 }
 
+function extractGenericPublishTime(html: string): string | null {
+  const $ = cheerio.load(html);
+  const meta =
+    $('meta[property="article:published_time"]').attr('content')?.trim() ||
+    $('meta[name="article:published_time"]').attr('content')?.trim() ||
+    $('meta[itemprop="datePublished"]').attr('content')?.trim() ||
+    $('meta[name="pubdate"]').attr('content')?.trim() ||
+    $('time[datetime]').first().attr('datetime')?.trim();
+  if (meta) return meta;
+  const text = $('body').text().replace(/\s+/g, ' ').slice(0, 2000);
+  return text.match(/20\d{2}[\/\-.年]\s*\d{1,2}[\/\-.月]\s*\d{1,2}(?:日)?(?:\s+\d{1,2}:\d{2})?/)?.[0] ?? null;
+}
+
 export function parseGenericHtml(url: URL, html: string): CrawledArticle | CrawlError {
   // 1) 先用 jsdom + Readability 找正文 HTML 块
   let articleHtml: string | null = null;
@@ -81,5 +94,6 @@ export function parseGenericHtml(url: URL, html: string): CrawledArticle | Crawl
     images,
     source: 'cheerio',
     host: url.hostname,
+    publish_time: extractGenericPublishTime(html),
   };
 }

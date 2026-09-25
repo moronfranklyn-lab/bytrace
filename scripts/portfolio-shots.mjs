@@ -34,7 +34,7 @@ const VIEWPORT_H = 900;
 const SHOTS = [
   { name: '01-工作台', path: '/', height: null, desc: '首页：选题推荐 + 最近用过的风格' },
   { name: '02-风格指纹列表', path: '/fingerprints', height: null, desc: '已拆解的博主指纹库' },
-  { name: '03-指纹详情-思敏学姐', path: '/fingerprints/x6xiH7pG20ytvU', height: null, desc: '四象限 + 论证骨架' },
+  { name: '03-指纹详情-思敏', path: '/fingerprints/x6xiH7pG20ytvU', height: null, desc: '四象限 + 论证骨架' },
   { name: '04-指纹详情-半佛仙人', path: '/fingerprints/mO6-NkOF3u6Jwo', height: null, desc: '结构能力与物件类比库' },
   { name: '05-写作流程', path: '/compose', height: null, desc: '七步流程入口' },
   { name: '06-选题中心', path: '/topics', height: null, desc: '风格推荐 + 热点聚合' },

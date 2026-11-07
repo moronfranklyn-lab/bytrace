@@ -1,0 +1,3512 @@
+'use client';
+
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from 'react';
+import { ComposeNav } from '@/components/nav/ComposeNav';
+import { Panel } from '@/components/compose/Panel';
+import { Toast } from '@/components/compose/Toast';
+import { PlatformPicker } from '@/components/compose/PlatformPicker';
+import { CompositionExplainer } from '@/components/compose/CompositionExplainer';
+import { ImagePanel } from '@/components/compose/ImagePanel';
+import { PLATFORMS as PLATFORM_TRAITS, getPlatform, type PlatformKey } from '@/lib/platforms';
+import { ARTICLE_CATEGORIES, type ArticleCategory } from '@/lib/prompts/fingerprint-v3-stage0';
+import type { Outline, OutlineSection } from '@/lib/prompts/outline';
+
+type LayoutKey = 'standard' | 'lively' | 'minimal';
+type PanelKey = 'platform' | 'layout' | 'image' | 'export' | 'explainer';
+
+interface LayoutOption {
+  key: LayoutKey;
+  name: string;
+  hint: string;
+}
+const LAYOUTS: LayoutOption[] = [
+  { key: 'standard', name: '正经版', hint: '公众号 · 知乎' },
+  { key: 'lively', name: '活泼版', hint: '小红书' },
+  { key: 'minimal', name: '极简版', hint: 'Medium · 博客' },
+];
+
+// ===== Types =====
+interface RecommendCard {
+  label?: string;
+  selected_authors: Array<{
+    author_id: string;
+    fingerprint_id: string;
+    weight: number;
+    reason?: string;
+  }>;
+  composition_summary: string;
+  why_match: string;
+  platform_match_quality?: 'exact' | 'cross-platform' | 'generic';
+}
+
+interface SelectedAuthor {
+  author_id: string;
+  fingerprint_id: string;
+  author_name: string;
+  platform?: string | null;
+  weight: number;
+  enabled: boolean;
+  reason?: string;
+}
+
+interface InspirationFragment {
+  id: string;
+  fingerprint_id: string;
+  author_name: string | null;
+  category: ArticleCategory | null;
+  tag: string | null;
+  title: string | null;
+  description: string | null;
+  example: string | null;
+  when_to_use: string | null;
+  why_works: string | null;
+  platform_scope: string[];
+}
+
+type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+
+const STEPS: Array<{ n: Step; label: string }> = [
+  { n: 1, label: '选目标平台' },
+  { n: 2, label: '题材思路' },
+  { n: 3, label: '推荐风格' },
+  { n: 4, label: '微调组合' },
+  { n: 5, label: '生成大纲' },
+  { n: 6, label: '流式正文' },
+  { n: 7, label: '预览导出' },
+];
+
+// ===== SSE 工具 =====
+async function* readSseEvents(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): AsyncGenerator<{ event: string; data: unknown }> {
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (value) buffer += decoder.decode(value, { stream: true });
+
+    let idx: number;
+    while ((idx = buffer.indexOf('\n\n')) !== -1) {
+      const block = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      if (!block.trim()) continue;
+      let event = 'message';
+      const dataLines: string[] = [];
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+      }
+      const dataStr = dataLines.join('\n');
+      let data: unknown = dataStr;
+      try { data = JSON.parse(dataStr); } catch {/* keep string */}
+      yield { event, data };
+    }
+    if (done) return;
+  }
+}
+
+// ===== Lucide-equivalent SVG =====
+function CopyIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+function RetryIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="23 4 23 10 17 10" />
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+    </svg>
+  );
+}
+function PlatformIcon() {
+  return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>;
+}
+function LayoutIcon() {
+  return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="18" y2="18"/></svg>;
+}
+function ImageIcon() {
+  return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>;
+}
+function ExportIcon() {
+  return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>;
+}
+function CodeIcon() { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>; }
+function FileIcon() { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>; }
+function TextIcon() { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="17" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="17" y1="18" x2="3" y2="18"/></svg>; }
+
+interface ExportButton {
+  label: string;
+  icon: () => ReactElement;
+  format: 'html' | 'md' | 'xhs-png' | 'txt';
+  toast: string;
+}
+const EXPORTS: ExportButton[] = [
+  { label: '公众号 HTML', icon: CodeIcon, format: 'html', toast: '公众号 HTML 已下载' },
+  { label: 'Markdown', icon: FileIcon, format: 'md', toast: 'Markdown 已下载' },
+  { label: '小红书长图', icon: ImageIcon, format: 'xhs-png', toast: '小红书长图已下载' },
+  { label: '纯文本', icon: TextIcon, format: 'txt', toast: '纯文本已下载' },
+];
+
+function safeExportName(md: string, fallback = '未命名文章'): string {
+  const heading = md.match(/^#\s+(.+?)\s*$/m)?.[1]?.trim() || fallback;
+  return heading.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-').replace(/\s+/g, ' ').slice(0, 60);
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function markdownToPlainText(md: string): string {
+  return md
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^>\s?/gm, '')
+    .replace(/^[-*+]\s+/gm, '')
+    .replace(/^\d+\.\s+/gm, '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/[*_`~]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+async function exportXhsLongImage(md: string): Promise<void> {
+  const title = safeExportName(md);
+  const body = markdownToPlainText(md.replace(/^#\s+.*$/m, '')).trim();
+  const width = 1080;
+  const paddingX = 92;
+  const contentWidth = width - paddingX * 2;
+  const titleSize = 54;
+  const bodySize = 34;
+  const bodyLineHeight = 58;
+  const paragraphGap = 26;
+
+  const measure = document.createElement('canvas').getContext('2d');
+  if (!measure) throw new Error('浏览器没能创建图片画布');
+  measure.font = `400 ${bodySize}px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif`;
+
+  const paragraphs = body.split(/\n+/).map((p) => p.trim()).filter(Boolean);
+  const lines: Array<{ text: string; gapAfter: boolean }> = [];
+  for (const paragraph of paragraphs) {
+    let line = '';
+    const chars = Array.from(paragraph);
+    for (const char of chars) {
+      const candidate = line + char;
+      if (line && measure.measureText(candidate).width > contentWidth) {
+        lines.push({ text: line, gapAfter: false });
+        line = char;
+      } else {
+        line = candidate;
+      }
+    }
+    if (line) lines.push({ text: line, gapAfter: true });
+  }
+
+  const bodyHeight = lines.reduce((sum, line) => sum + bodyLineHeight + (line.gapAfter ? paragraphGap : 0), 0);
+  const height = Math.max(1440, 300 + bodyHeight + 160);
+  if (height > 16000) throw new Error('正文太长，请先切换到小红书版本再导出');
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('浏览器没能创建图片画布');
+
+  ctx.fillStyle = '#f7f4ee';
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = '#cf553d';
+  ctx.fillRect(paddingX, 78, 72, 8);
+  ctx.fillStyle = '#1e1d1a';
+  ctx.font = `600 ${titleSize}px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif`;
+  ctx.textBaseline = 'top';
+
+  let y = 112;
+  let titleLine = '';
+  for (const char of Array.from(title)) {
+    const candidate = titleLine + char;
+    if (titleLine && ctx.measureText(candidate).width > contentWidth) {
+      ctx.fillText(titleLine, paddingX, y);
+      y += 72;
+      titleLine = char;
+    } else titleLine = candidate;
+  }
+  if (titleLine) ctx.fillText(titleLine, paddingX, y);
+  y += 104;
+
+  ctx.fillStyle = '#37342f';
+  ctx.font = `400 ${bodySize}px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif`;
+  for (const line of lines) {
+    ctx.fillText(line.text, paddingX, y);
+    y += bodyLineHeight + (line.gapAfter ? paragraphGap : 0);
+  }
+
+  ctx.fillStyle = '#8b857b';
+  ctx.font = '400 24px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+  ctx.fillText('由 笔迹 ByTrace 排版导出', paddingX, height - 72);
+
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png', 0.94));
+  if (!blob) throw new Error('图片生成失败');
+  downloadBlob(blob, `${title}-小红书长图.png`);
+}
+
+const IDEA_CHIPS = [
+  '为什么越努力越穷？从剩余价值的现代变形入手，结合 996/KPI/内卷三个现象，落到议价权而非时间。',
+  '想写一篇关于"为什么读书越多越焦虑"的随笔，从信息密度过载切入，最后回到读书是慢功夫。',
+  'AI 时代普通人的护城河到底是什么？我想写一篇拒绝爽文、拒绝贩卖焦虑的冷静稿。',
+];
+
+// ===== Markdown 微渲染 =====
+function renderMarkdown(md: string): string {
+  const lines = md.split('\n');
+  const out: string[] = [];
+  let listType: 'ul' | 'ol' | null = null;
+  let inQuote = false;
+  const closeList = () => {
+    if (listType) {
+      out.push(listType === 'ul' ? '</ul>' : '</ol>');
+      listType = null;
+    }
+  };
+  const closeQuote = () => {
+    if (inQuote) { out.push('</blockquote>'); inQuote = false; }
+  };
+  const escapeHtml = (s: string) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const inline = (s: string) =>
+    escapeHtml(s)
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) { closeList(); closeQuote(); continue; }
+    if (/^#\s+/.test(line))  { closeList(); closeQuote(); out.push(`<h1 class="article-title">${inline(line.replace(/^#\s+/, ''))}</h1>`); continue; }
+    if (/^##\s+/.test(line)) { closeList(); closeQuote(); out.push(`<h2 class="article-h2">${inline(line.replace(/^##\s+/, ''))}</h2>`); continue; }
+    if (/^>\s+/.test(line))  {
+      closeList();
+      if (!inQuote) { out.push('<blockquote class="article-quote">'); inQuote = true; }
+      out.push(`<p>${inline(line.replace(/^>\s+/, ''))}</p>`);
+      continue;
+    }
+    closeQuote();
+    if (/^-\s+/.test(line))     {
+      if (listType !== 'ul') { closeList(); out.push('<ul>'); listType = 'ul'; }
+      out.push(`<li>${inline(line.replace(/^-\s+/, ''))}</li>`); continue;
+    }
+    if (/^\d+\.\s+/.test(line)) {
+      if (listType !== 'ol') { closeList(); out.push('<ol>'); listType = 'ol'; }
+      out.push(`<li>${inline(line.replace(/^\d+\.\s+/, ''))}</li>`); continue;
+    }
+    closeList();
+    out.push(`<p>${inline(line)}</p>`);
+  }
+  closeList(); closeQuote();
+  return out.join('\n');
+}
+
+function countWords(s: string): number {
+  // 中文按字符算；英文按词算的近似简化版
+  return s.replace(/\s+/g, '').length;
+}
+
+function stripJsonFence(raw: string): string {
+  const m = raw.match(/```json\s*([\s\S]*?)```/i);
+  if (m) return m[1].trim();
+  const fb = raw.search(/[\[{]/);
+  const lb = Math.max(raw.lastIndexOf(']'), raw.lastIndexOf('}'));
+  if (fb !== -1 && lb > fb) return raw.slice(fb, lb + 1).trim();
+  return raw.trim();
+}
+
+// ===== 主组件 =====
+export default function ComposePage() {
+  const [step, setStep] = useState<Step>(1);
+
+  // Step 1 · 目标平台 + 具体站点（可选；选了某个站点画像，prompt 会注入它的 profile）
+  const [targetPlatform, setTargetPlatform] = useState<PlatformKey | null>(null);
+  const [targetSiteId, setTargetSiteId] = useState<string | null>(null);
+  // Step 1 多选：「顺手出这些版本」勾选的非主平台。主平台默认勾且不可取消。
+  const [additionalPlatforms, setAdditionalPlatforms] = useState<PlatformKey[]>([]);
+
+  // Step 2 · 题材
+  const [idea, setIdea] = useState('');
+
+  // Step 3 · 推荐
+  const [recommendLoading, setRecommendLoading] = useState(false);
+  const [recommendError, setRecommendError] = useState<string | null>(null);
+  const [recommendations, setRecommendations] = useState<RecommendCard[]>([]);
+  const [recommendStream, setRecommendStream] = useState('');
+  const [pickedRec, setPickedRec] = useState<number | null>(null);
+  const [emptyLibrary, setEmptyLibrary] = useState(false);
+  const recommendCtrl = useRef<AbortController | null>(null);
+
+  // Step 4 — selected authors after tuning
+  const [authors, setAuthors] = useState<SelectedAuthor[]>([]);
+  const [customNotes, setCustomNotes] = useState('');
+  /** 用户最终选定的推荐卡片（透传给 Step 7 explainer） */
+  const [chosenRecommendation, setChosenRecommendation] = useState<RecommendCard | null>(null);
+
+  // 灵感参考 · 跨博主碎片（类别可选，默认不选 = 全部，不污染 prompt）
+  const [inspirationCategory, setInspirationCategory] = useState<ArticleCategory | null>(null);
+  const [inspirationItems, setInspirationItems] = useState<InspirationFragment[]>([]);
+  const [inspirationLoading, setInspirationLoading] = useState(false);
+  const [inspirationOpen, setInspirationOpen] = useState(true);
+
+  // 风格配方（选了配方 → 把碎片汇成文本注入 customNotes，让下游 prompt 接收到）
+  const [selectedRecipeId, setSelectedRecipeId] = useState<string | null>(null);
+
+  // ===== v3.5 · 后台 codex 联网搜集 =====
+  // idea 一确认就在后台 fire-and-forget 跑 /api/compose/gather；
+  // 用户在 Step 3-4 选风格的同时素材包在后台跑；Step 5 outline 触发前等它就绪。
+  type GatherStatus = 'idle' | 'running' | 'done' | 'error' | 'skipped';
+  const [gatherStatus, setGatherStatus] = useState<GatherStatus>('idle');
+  const [gatherMaterial, setGatherMaterial] = useState<string>('');
+  const [gatherIdeaHash, setGatherIdeaHash] = useState<string>('');
+  const [gatherChars, setGatherChars] = useState<number>(0);
+  const [gatherStartedAt, setGatherStartedAt] = useState<number | null>(null);
+  const [gatherFromCache, setGatherFromCache] = useState(false);
+  const [gatherError, setGatherError] = useState<string | null>(null);
+  const [gatherElapsedMs, setGatherElapsedMs] = useState<number>(0);
+  // 标识"当前跑的 gather 对应的 idea hash"，避免 idea 改了之后老 gather 结果污染
+  const gatherCurrentIdeaRef = useRef<string>('');
+  const gatherCtrl = useRef<AbortController | null>(null);
+
+  // v3.5 · outline 软等待：进入 Step 5 时如果 gather 还在跑且预估快好（≤ SOFT_WAIT_THRESHOLD_SEC 秒前已经在跑），
+  //   就停在「等事实底座」面板上，待 gather 完成或用户点「不等了」再触发 outline fetch。
+  // 估算逻辑：codex 联网搜集一般 4-6 分钟（240-360 秒）。若 elapsed ≥ 180 秒，认为"差不多快好了"值得等；
+  //   若 elapsed < 180 秒，差距太大，不等，让用户在等待面板里手动选。
+  const [outlineWaitingForGather, setOutlineWaitingForGather] = useState(false);
+  // 用 ref 同步 gatherStatus，避免 useEffect 闭包陈旧
+  const gatherStatusRef = useRef(gatherStatus);
+  useEffect(() => { gatherStatusRef.current = gatherStatus; }, [gatherStatus]);
+  const gatherMaterialRef = useRef(gatherMaterial);
+  useEffect(() => { gatherMaterialRef.current = gatherMaterial; }, [gatherMaterial]);
+
+  // Step 5 — outline
+  const [outline, setOutline] = useState<Outline | null>(null);
+  const [outlineLoading, setOutlineLoading] = useState(false);
+  const [outlineStream, setOutlineStream] = useState('');
+  const [outlineError, setOutlineError] = useState<string | null>(null);
+  const outlineCtrl = useRef<AbortController | null>(null);
+
+  // Step 6 — draft
+  /**
+   * 多平台 draft 状态。key = PlatformKey。
+   *   status: pending（排队中）/ streaming（流式中）/ done（已完成）/ error
+   *   content_md：累计的正文 markdown
+   *   error：单平台失败时的错误信息
+   * 单平台路径下，platforms 长度 = 1，行为退化等同现状。
+   */
+  type DraftPhase = 'pending' | 'streaming' | 'done' | 'error';
+  // v3.4 · critic 维度分（前端展示用）
+  interface CriticScores {
+    structure?: number;
+    depth?: number;
+    analogy?: number;
+    punchline?: number;
+    taboo?: number;
+  }
+  interface DraftEntry {
+    status: DraftPhase;
+    content_md: string;
+    error?: string;
+    // v3.4 · Reflection Loop 状态
+    // critic_attempt：当前是第几次 attempt（1 起算；草稿生成中）
+    // critic_phase：'writing' | 'reviewing' | 'rewriting' | 'best_of_n'（仅 UI 展示用）
+    // last_critic：最近一次 critic 评分结果（用于显示评分卡片）
+    critic_attempt?: number;
+    critic_phase?: 'writing' | 'reviewing' | 'rewriting' | 'best_of_n';
+    last_critic?: {
+      total: number;
+      passed: boolean;
+      threshold: number;
+      scores: CriticScores;
+      weakest: string | null;
+      rewrite_hint: string;
+    };
+    critic_runs_count?: number;
+  }
+  const [draftPlatforms, setDraftPlatforms] = useState<PlatformKey[]>([]);
+  const [draftMainPlatform, setDraftMainPlatform] = useState<PlatformKey | null>(null);
+  const [draftMap, setDraftMap] = useState<Partial<Record<PlatformKey, DraftEntry>>>({});
+  // active tab：当前 Step 6 用户在看哪一个平台
+  const [activeDraftTab, setActiveDraftTab] = useState<PlatformKey | null>(null);
+  const [draftLoading, setDraftLoading] = useState(false);
+  const [draftDone, setDraftDone] = useState(false);
+  // 整体级错误（比如连接断了）。单平台失败放在 draftMap[key].error 里。
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const draftCtrl = useRef<AbortController | null>(null);
+  const draftScrollRefs = useRef<Partial<Record<PlatformKey, HTMLDivElement | null>>>({});
+
+  // Step 7 · 预览导出
+  const [layout, setLayout] = useState<LayoutKey>('standard');
+  /** 预览当前所选平台（独立于 targetPlatform，便于切平台对比） */
+  const [previewPlatform, setPreviewPlatform] = useState<PlatformKey>('wechat');
+  const [panels, setPanels] = useState<Record<PanelKey, boolean>>({
+    platform: true, layout: true, image: true, export: true, explainer: false,
+  });
+  const [refineLoading, setRefineLoading] = useState(false);
+  const [refineMap, setRefineMap] = useState<Partial<Record<PlatformKey, string>>>({});
+  const refineCtrl = useRef<AbortController | null>(null);
+  const [articleId, setArticleId] = useState<string | null>(null);
+
+  // Toast
+  const [toast, setToast] = useState<{ visible: boolean; message: string }>({ visible: false, message: '' });
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = useCallback((message: string) => {
+    setToast({ visible: true, message });
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast((t) => ({ ...t, visible: false })), 2400);
+  }, []);
+
+  // 回跳 / 卸载时统一掐断所有在途流（gather 是后台任务，另有自己的生命周期，不在此列）。
+  // 不清空 ref：各流自己的 catch 会按"是否仍是当前一轮"判断要不要收尾状态。
+  const abortInflightStreams = useCallback(() => {
+    for (const ref of [recommendCtrl, outlineCtrl, draftCtrl, refineCtrl]) {
+      if (ref.current) {
+        try { ref.current.abort(); } catch {/* ignore */}
+      }
+    }
+  }, []);
+
+  // 组件卸载：掐掉所有在途流（含后台 gather）+ 清 toast 定时器，避免卸载后连接泄漏
+  useEffect(() => {
+    return () => {
+      abortInflightStreams();
+      if (gatherCtrl.current) {
+        try { gatherCtrl.current.abort(); } catch {/* ignore */}
+      }
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+    };
+  }, [abortInflightStreams]);
+
+  // 从 URL 加载已有文章（用于历史文章"预览导出"按钮）
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const articleIdFromUrl = params.get('article_id');
+    if (!articleIdFromUrl) return;
+
+    // 避免重复加载
+    if (articleId === articleIdFromUrl) return;
+
+    // 加载文章数据
+    fetch(`/api/articles/${articleIdFromUrl}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((article: {
+        id: string;
+        title: string | null;
+        content_md: string | null;
+        platform_target: string | null;
+        outline: Outline | null;
+        refine_versions: unknown;
+      }) => {
+        if (!article.content_md) {
+          showToast('文章内容为空');
+          return;
+        }
+
+        // 恢复状态
+        setArticleId(article.id);
+        const platformKey = article.platform_target as PlatformKey || 'wechat';
+        setTargetPlatform(platformKey);
+        setPreviewPlatform(platformKey);
+        setDraftMainPlatform(platformKey);
+        setDraftPlatforms([platformKey]);
+
+        // 设置 draft 内容
+        setDraftMap({
+          [platformKey]: {
+            status: 'done',
+            content_md: article.content_md,
+            word_count: article.content_md.length,
+            critic: null,
+          },
+        });
+        setActiveDraftTab(platformKey);
+        setDraftDone(true);
+
+        // 恢复 outline
+        if (article.outline) {
+          setOutline(article.outline);
+        }
+
+        // 恢复 refine 版本
+        if (article.refine_versions) {
+          try {
+            const versions = article.refine_versions;
+            const refineMap: Partial<Record<PlatformKey, string>> = {};
+            if (Array.isArray(versions)) {
+              for (const v of versions) {
+                if (v.target_platform && v.content_md) {
+                  refineMap[v.target_platform as PlatformKey] = v.content_md;
+                }
+              }
+            } else if (typeof versions === 'object') {
+              // 兼容旧的 dict 格式
+              for (const [key, val] of Object.entries(versions)) {
+                if (typeof val === 'string') {
+                  refineMap[key as PlatformKey] = val;
+                } else if (val && typeof val === 'object' && 'content_md' in val) {
+                  refineMap[key as PlatformKey] = (val as { content_md: string }).content_md;
+                }
+              }
+            }
+            setRefineMap(refineMap);
+          } catch {
+            // ignore
+          }
+        }
+
+        // 直接跳到步骤 7
+        setStep(7);
+        showToast('文章已加载');
+      })
+      .catch((err) => {
+        showToast(`加载文章失败：${(err as Error).message}`);
+      });
+  }, [articleId, showToast]);
+
+  const ideaWordCount = useMemo(() => countWords(idea), [idea]);
+
+  // 从 /research 跳过来时：把调研报告作为素材注入 customNotes（一次性，读完即清）
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem('research_to_compose');
+      if (!raw) return;
+      sessionStorage.removeItem('research_to_compose');
+      const payload = JSON.parse(raw) as { topic?: string; md?: string };
+      if (payload.md) {
+        const block = `---\n# 调研报告 · 写作弹药（来自深度调研）\n${payload.md}`;
+        setCustomNotes((prev) => {
+          const stripped = prev.replace(/\n*---\n# 调研报告 ·[\s\S]*$/, '').trim();
+          return stripped ? `${stripped}\n\n${block}` : block;
+        });
+      }
+      if (payload.topic) setIdea((prev) => (prev ? prev : payload.topic ?? ''));
+    } catch {
+      /* ignore */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 当 targetPlatform 改变时，把预览平台同步过去
+  useEffect(() => {
+    if (targetPlatform) setPreviewPlatform(targetPlatform);
+  }, [targetPlatform]);
+
+  // 灵感参考拉取：选了平台后即可拉；类别不选 = 不带 category（全部）
+  useEffect(() => {
+    // 只在 Step 4（微调组合）阶段拉，避免无谓请求
+    if (step !== 4) return;
+    if (!targetPlatform) return;
+    const platformName = getPlatform(targetPlatform).name;
+    const params = new URLSearchParams();
+    if (inspirationCategory) params.set('category', inspirationCategory);
+    params.set('platform', platformName);
+    params.set('limit', '10');
+    const ctrl = new AbortController();
+    setInspirationLoading(true);
+    fetch(`/api/strategies/search?${params.toString()}`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((j: { items?: InspirationFragment[] }) => {
+        setInspirationItems(Array.isArray(j?.items) ? j.items.slice(0, 6) : []);
+        setInspirationLoading(false);
+      })
+      .catch((e: Error) => {
+        if (e.name !== 'AbortError') {
+          setInspirationItems([]);
+          setInspirationLoading(false);
+        }
+      });
+    return () => ctrl.abort();
+  }, [step, targetPlatform, inspirationCategory]);
+
+  // ----- Step 1 -> 2 -----
+  const goFromPlatformToIdea = useCallback(() => {
+    if (!targetPlatform) {
+      showToast('先挑一个目标平台再走下一步');
+      return;
+    }
+    setStep(2);
+  }, [targetPlatform, showToast]);
+
+  // ----- v3.5 · 后台 codex 联网搜集 -----
+  /**
+   * idea 一确认就在后台跑一次 codex 联网搜集。fire-and-forget，不阻塞用户。
+   * 命中缓存（同一 idea 已搜过）秒返。
+   *
+   * 调用方：goRecommend（Step 2→3）或 skipRecommendation（Step 2 直接跳到 Step 4/5）。
+   * 同 idea 多次调用：去重——同一 idea 不重启第二次。
+   */
+  const kickoffGather = useCallback((currentIdea: string) => {
+    const trimmed = currentIdea.trim();
+    if (trimmed.length < 30) return;
+    if (gatherCurrentIdeaRef.current === trimmed) return; // 同一 idea 不重启
+    // 切掉之前那次（idea 改过来了，旧请求作废）
+    if (gatherCtrl.current) {
+      try { gatherCtrl.current.abort(); } catch {/* ignore */}
+    }
+    gatherCurrentIdeaRef.current = trimmed;
+    setGatherStatus('running');
+    setGatherMaterial('');
+    setGatherIdeaHash('');
+    setGatherChars(0);
+    setGatherFromCache(false);
+    setGatherError(null);
+    setGatherElapsedMs(0);
+    // 用局部变量计时：progress 回调闭包里读 state 拿到的是旧值，恒算错
+    const startedAt = Date.now();
+    setGatherStartedAt(startedAt);
+
+    const ctrl = new AbortController();
+    gatherCtrl.current = ctrl;
+
+    (async () => {
+      try {
+        const resp = await fetch('/api/compose/gather', {
+          method: 'POST',
+          signal: ctrl.signal,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idea: trimmed }),
+        });
+        if (!resp.body) {
+          setGatherStatus('error');
+          setGatherError('响应没有 body');
+          return;
+        }
+        const reader = resp.body.getReader();
+        // 流正常关闭但没收到 done/error（比如 dev server 重启）时，别让"搜集中"永久卡死
+        let sawDone = false;
+        for await (const evt of readSseEvents(reader)) {
+          // idea 中途改过，老结果作废
+          if (gatherCurrentIdeaRef.current !== trimmed) return;
+          if (evt.event === 'cached') {
+            const d = evt.data as { material_md?: string; chars?: number; idea_hash?: string };
+            setGatherFromCache(true);
+            setGatherIdeaHash(d.idea_hash ?? '');
+            setGatherMaterial(d.material_md ?? '');
+            setGatherChars(d.chars ?? 0);
+          } else if (evt.event === 'started') {
+            const d = evt.data as { idea_hash?: string };
+            setGatherIdeaHash(d.idea_hash ?? '');
+          } else if (evt.event === 'progress') {
+            // 心跳：让 UI 知道 codex 还在干活，不卡死
+            setGatherElapsedMs(Date.now() - startedAt);
+          } else if (evt.event === 'done') {
+            const d = evt.data as {
+              material_md?: string;
+              chars?: number;
+              idea_hash?: string;
+              elapsed_ms?: number;
+              from_cache?: boolean;
+            };
+            setGatherMaterial(d.material_md ?? '');
+            setGatherChars(d.chars ?? 0);
+            setGatherIdeaHash(d.idea_hash ?? '');
+            setGatherElapsedMs(d.elapsed_ms ?? 0);
+            setGatherFromCache(!!d.from_cache);
+            setGatherStatus('done');
+            sawDone = true;
+          } else if (evt.event === 'error') {
+            const d = evt.data as { message?: string };
+            setGatherStatus('error');
+            setGatherError(d.message || '联网搜集这次没成，我们换个角度再试一次');
+            sawDone = true;
+          }
+        }
+        if (!sawDone && gatherCurrentIdeaRef.current === trimmed) {
+          setGatherStatus('error');
+          setGatherError('连接断开了，可以点重试再搜一次');
+        }
+      } catch (e) {
+        if ((e as Error).name === 'AbortError') return;
+        setGatherStatus('error');
+        setGatherError((e as Error).message);
+      }
+    })();
+  }, []);
+
+  // ----- Step 2 -> 3 -----
+  const goRecommend = useCallback(async () => {
+    if (ideaWordCount < 30) {
+      showToast(`再多写一点（当前 ${ideaWordCount} 字 · 至少 30 字）`);
+      return;
+    }
+    // v3.5：进 Step 3 的同时，后台开始 codex 联网搜集——用户在 Step 3-4 选风格的时候它在跑
+    kickoffGather(idea);
+    setStep(3);
+    setRecommendLoading(true);
+    setRecommendError(null);
+    setRecommendStream('');
+    setRecommendations([]);
+    setPickedRec(null);
+    setEmptyLibrary(false);
+
+    // 掐掉上一轮还在途的推荐流（重试 / 回跳再进都可能触发），避免两条流并发交错
+    if (recommendCtrl.current) {
+      try { recommendCtrl.current.abort(); } catch {/* ignore */}
+    }
+    const ctrl = new AbortController();
+    recommendCtrl.current = ctrl;
+
+    try {
+      const resp = await fetch('/api/recommend', {
+        method: 'POST',
+        signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idea, target_platform: targetPlatform ?? undefined }),
+      });
+
+      const ct = resp.headers.get('Content-Type') || '';
+      if (ct.includes('application/json')) {
+        // 指纹库为空 / 错误
+        const j = await resp.json();
+        if (j && j.empty) {
+          setEmptyLibrary(true);
+          setRecommendLoading(false);
+          showToast('指纹库还没有博主，跳过推荐，使用通用风格');
+          return;
+        }
+        if (j && j.error) {
+          setRecommendError(j.error);
+          setRecommendLoading(false);
+          return;
+        }
+        setRecommendError('未知响应');
+        setRecommendLoading(false);
+        return;
+      }
+
+      if (!resp.body) { setRecommendError('响应没有 body'); setRecommendLoading(false); return; }
+      const reader = resp.body.getReader();
+      let sawDone = false;
+      for await (const evt of readSseEvents(reader)) {
+        if (evt.event === 'chunk') {
+          const text = (evt.data as { text?: string })?.text ?? '';
+          setRecommendStream((s) => s + text);
+        } else if (evt.event === 'done') {
+          const recs = (evt.data as { recommendations?: RecommendCard[] })?.recommendations ?? [];
+          setRecommendations(recs);
+          setRecommendLoading(false);
+          sawDone = true;
+        } else if (evt.event === 'error') {
+          const d = evt.data as { message?: string };
+          setRecommendError(d.message || '模型那边出了点小问题');
+          setRecommendLoading(false);
+          sawDone = true;
+        }
+      }
+      // 流正常关闭但没收到终结事件（比如 dev server 重启）：别让加载态永久卡死
+      if (!sawDone && recommendCtrl.current === ctrl) {
+        setRecommendError('连接断开了，可以再试一次');
+        setRecommendLoading(false);
+      }
+    } catch (e) {
+      // 已被新一轮接管 / 主动中止：别动状态，让新一轮自己管
+      if (recommendCtrl.current !== ctrl || (e as Error).name === 'AbortError') return;
+      setRecommendError((e as Error).message);
+      setRecommendLoading(false);
+    }
+  }, [idea, ideaWordCount, showToast, targetPlatform]);
+
+  // ----- 选定推荐 → Step 4 -----
+  const pickRecommendation = useCallback(async (i: number) => {
+    setPickedRec(i);
+    const rec = recommendations[i];
+    if (!rec) return;
+    setChosenRecommendation(rec);
+    // 拉一下指纹名字 / 平台（一次性查所有），为 UI 显示
+    const meta = await fetchFingerprintNames(rec.selected_authors.map((a) => a.fingerprint_id));
+    setAuthors(
+      rec.selected_authors.map((a) => ({
+        author_id: a.author_id,
+        fingerprint_id: a.fingerprint_id,
+        author_name: meta[a.fingerprint_id]?.author_name ?? '（未知博主）',
+        platform: meta[a.fingerprint_id]?.platform ?? null,
+        weight: a.weight,
+        enabled: true,
+        reason: a.reason,
+      })),
+    );
+    setStep(4);
+  }, [recommendations]);
+
+  // v3.5：实际发起 outline fetch（独立函数，goOutline 与"软等待 useEffect"共用）
+  const runOutlineFetch = useCallback(async (materialOverride?: string) => {
+    setOutlineLoading(true);
+    setOutlineError(null);
+    setOutlineStream('');
+    setOutline(null);
+
+    const composition = {
+      selected_authors: authors
+        .filter((a) => a.enabled)
+        .map((a) => ({
+          author_id: a.author_id,
+          fingerprint_id: a.fingerprint_id,
+          weight: a.weight,
+        })),
+      custom_notes: customNotes || undefined,
+    };
+
+    // 用 ref 取最新 gather 状态（避免 callback 闭包旧值）；显式 override 优先
+    const ref = gatherStatusRef.current;
+    const refMd = gatherMaterialRef.current;
+    const researchMaterial =
+      materialOverride !== undefined
+        ? (materialOverride || undefined)
+        : (ref === 'done' && refMd ? refMd : undefined);
+
+    // 掐掉上一轮还在途的 outline 流（重试 / 回跳再进都可能触发），避免两条流交错写 outlineStream
+    if (outlineCtrl.current) {
+      try { outlineCtrl.current.abort(); } catch {/* ignore */}
+    }
+    const ctrl = new AbortController();
+    outlineCtrl.current = ctrl;
+
+    try {
+      const resp = await fetch('/api/compose/outline', {
+        method: 'POST',
+        signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idea,
+          composition,
+          target_platform: targetPlatform ?? undefined,
+          target_site_id: targetSiteId ?? undefined,
+          research_material: researchMaterial,
+        }),
+      });
+      if (!resp.body) { setOutlineError('响应没有 body'); setOutlineLoading(false); return; }
+      const reader = resp.body.getReader();
+      let sawDone = false;
+      for await (const evt of readSseEvents(reader)) {
+        if (evt.event === 'chunk') {
+          const text = (evt.data as { text?: string })?.text ?? '';
+          setOutlineStream((s) => s + text);
+        } else if (evt.event === 'done') {
+          const ol = (evt.data as { outline?: Outline })?.outline;
+          if (ol) setOutline(ol);
+          setOutlineLoading(false);
+          sawDone = true;
+        } else if (evt.event === 'error') {
+          const d = evt.data as { message?: string };
+          setOutlineError(d.message || '大纲生成出了点状况');
+          setOutlineLoading(false);
+          sawDone = true;
+        }
+      }
+      // 流正常关闭但没收到终结事件（比如 dev server 重启）：别让"正在写大纲"永久卡死
+      if (!sawDone && outlineCtrl.current === ctrl) {
+        setOutlineError('连接断开了，可以点「再试一次」重来');
+        setOutlineLoading(false);
+      }
+    } catch (e) {
+      // 已被新一轮接管 / 主动中止：别动状态，让新一轮自己管
+      if (outlineCtrl.current !== ctrl || (e as Error).name === 'AbortError') return;
+      setOutlineError((e as Error).message);
+      setOutlineLoading(false);
+    }
+  }, [authors, customNotes, idea, targetPlatform, targetSiteId]);
+
+  // Step 4 -> 5：生成大纲
+  // v3.5：软等待逻辑——如果 gather 还在跑，进 Step 5 但停在"等事实底座"面板，
+  //   不立刻发 fetch；用户点"不等了"或 gather 自然完成时再触发（见 useEffect 下面）。
+  const goOutline = useCallback(async () => {
+    setStep(5);
+    if (gatherStatus === 'running') {
+      setOutlineWaitingForGather(true);
+      return;
+    }
+    await runOutlineFetch();
+  }, [gatherStatus, runOutlineFetch]);
+
+  // 跳过推荐（指纹库空 / 用户选择"我自己选"）
+  // 指纹库为空时不能裸跳 Step 5——没有任何入口会触发大纲生成，新用户会停在空面板。
+  // 复用 goOutline：它自带 gather 软等待逻辑。定义放在 goOutline 之后，避免暂时性死区。
+  const skipRecommendation = useCallback(() => {
+    setChosenRecommendation(null);
+    if (emptyLibrary) {
+      setAuthors([]);
+      void goOutline();
+    } else {
+      setStep(4);
+    }
+  }, [emptyLibrary, goOutline]);
+
+  // v3.5：软等待续接——当用户在等 gather 时，gatherStatus 一旦从 running 变成 done/error/skipped
+  //   立刻触发真正的 outline fetch；同一份等待面板下完成自动续上。
+  useEffect(() => {
+    if (!outlineWaitingForGather) return;
+    if (gatherStatus === 'running') return;
+    setOutlineWaitingForGather(false);
+    // gather 完成、失败、跳过——无论哪种结果都触发 outline fetch
+    void runOutlineFetch();
+    // 仅在 gatherStatus 变化时触发；runOutlineFetch deps 已稳
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gatherStatus, outlineWaitingForGather]);
+
+  // v3.5：用户点"不等了"——立刻关掉等待 + 触发 outline（不带 material）
+  const skipOutlineWait = useCallback(() => {
+    setOutlineWaitingForGather(false);
+    void runOutlineFetch('');
+  }, [runOutlineFetch]);
+
+  // 中止 / 连接断开时，把还没写完的平台状态收敛掉，避免 tab 永远停在"流式中 / 排队中"
+  const settleUnfinishedDrafts = useCallback((message: string) => {
+    setDraftMap((m) => {
+      const next = { ...m };
+      let changed = false;
+      for (const key of Object.keys(next) as PlatformKey[]) {
+        const entry = next[key];
+        if (entry && entry.status !== 'done' && entry.status !== 'error') {
+          next[key] = { ...entry, status: 'error', critic_phase: undefined, error: message };
+          changed = true;
+        }
+      }
+      return changed ? next : m;
+    });
+  }, []);
+
+  // Step 5 -> 6：流式写正文（支持多平台版本，循环 N 次）
+  const goDraft = useCallback(async (retryPlatforms?: PlatformKey[]) => {
+    if (!outline) {
+      showToast('大纲还没准备好');
+      return;
+    }
+    setStep(6);
+    // 构造平台列表：主平台 + additionalPlatforms 去重
+    const main: PlatformKey = targetPlatform ?? 'wechat';
+    const platforms: PlatformKey[] = retryPlatforms?.length ? [...retryPlatforms] : [main];
+    if (!retryPlatforms?.length) {
+      for (const p of additionalPlatforms) {
+        if (p !== main && !platforms.includes(p)) platforms.push(p);
+      }
+    }
+    const isPartialRetry = !!retryPlatforms?.length;
+
+    // 初始化每平台状态
+    if (isPartialRetry) {
+      setDraftMap((current) => {
+        const next = { ...current };
+        for (const p of platforms) next[p] = { status: 'pending', content_md: '' };
+        return next;
+      });
+      setActiveDraftTab(platforms[0]);
+    } else {
+      const initialMap: Partial<Record<PlatformKey, DraftEntry>> = {};
+      for (const p of platforms) initialMap[p] = { status: 'pending', content_md: '' };
+      setDraftPlatforms(platforms);
+      setDraftMainPlatform(main);
+      setDraftMap(initialMap);
+      setActiveDraftTab(platforms[0]);
+      setArticleId(null);
+      setRefineMap({});
+    }
+    setDraftLoading(true);
+    setDraftDone(false);
+    setDraftError(null);
+
+    const composition = {
+      selected_authors: authors
+        .filter((a) => a.enabled)
+        .map((a) => ({
+          author_id: a.author_id,
+          fingerprint_id: a.fingerprint_id,
+          weight: a.weight,
+        })),
+      custom_notes: customNotes || undefined,
+    };
+
+    // 先掐掉上一轮还在途的 draft 流（重新生成 / 回跳再进都可能触发），
+    // 避免两条流并发交错写 draftMap + 服务端双落库
+    if (draftCtrl.current) {
+      try { draftCtrl.current.abort(); } catch {/* ignore */}
+    }
+    const ctrl = new AbortController();
+    draftCtrl.current = ctrl;
+
+    // v3.5：只在 gather 已就绪时透给 draft；其余状态降级（critic 仍会按非素材包模式跑）
+    const researchMaterialForDraft =
+      gatherStatus === 'done' && gatherMaterial ? gatherMaterial : undefined;
+    const completedVersions: Partial<Record<PlatformKey, string>> = {};
+    if (isPartialRetry) {
+      for (const [platform, entry] of Object.entries(draftMap)) {
+        if (entry?.status === 'done' && entry.content_md) {
+          completedVersions[platform as PlatformKey] = entry.content_md;
+        }
+      }
+    }
+
+    try {
+      const resp = await fetch('/api/compose/draft', {
+        method: 'POST',
+        signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idea,
+          composition,
+          outline,
+          target_platform: targetPlatform ?? undefined,
+          target_site_id: (!isPartialRetry || platforms[0] === main) ? targetSiteId ?? undefined : undefined,
+          platforms,
+          existing_article_id: isPartialRetry ? articleId ?? undefined : undefined,
+          existing_versions: isPartialRetry ? completedVersions : undefined,
+          research_material: researchMaterialForDraft,
+        }),
+      });
+      if (!resp.body) { setDraftError('响应没有 body'); setDraftLoading(false); return; }
+      const reader = resp.body.getReader();
+      let sawDone = false;
+      for await (const evt of readSseEvents(reader)) {
+        if (evt.event === 'open') {
+          // 服务端确认的 platforms 可能与前端略不同（理论上不会，但稳一手）
+          const d = evt.data as { platforms?: PlatformKey[]; main_platform?: PlatformKey };
+          if (Array.isArray(d.platforms) && d.platforms.length > 0) {
+            setDraftPlatforms(d.platforms);
+            if (d.main_platform) setDraftMainPlatform(d.main_platform);
+            setActiveDraftTab((cur) => cur ?? d.platforms![0]);
+          }
+        } else if (evt.event === 'platform_start') {
+          const d = evt.data as { platform?: PlatformKey };
+          if (!d.platform) continue;
+          const p = d.platform;
+          setDraftMap((m) => ({
+            ...m,
+            [p]: {
+              status: 'streaming',
+              content_md: '',
+              error: undefined,
+              critic_attempt: 1,
+              critic_phase: 'writing',
+            },
+          }));
+          // 切到刚开始流的 tab（仅在用户还没主动切走时）
+          setActiveDraftTab((cur) => cur === null ? p : cur);
+        } else if (evt.event === 'delta') {
+          const d = evt.data as { platform?: PlatformKey; delta?: string; attempt?: number };
+          if (!d.platform || !d.delta) continue;
+          const p = d.platform;
+          setDraftMap((m) => {
+            const prev = m[p] ?? { status: 'streaming' as DraftPhase, content_md: '' };
+            return {
+              ...m,
+              [p]: {
+                ...prev,
+                status: 'streaming',
+                content_md: prev.content_md + d.delta,
+                critic_attempt: d.attempt ?? prev.critic_attempt ?? 1,
+                critic_phase: 'writing',
+              },
+            };
+          });
+          // 自动滚到底（仅对当前 active tab 滚）
+          requestAnimationFrame(() => {
+            const el = draftScrollRefs.current[p];
+            if (el) el.scrollTop = el.scrollHeight;
+          });
+        } else if (evt.event === 'critic_start') {
+          // v3.4：草稿写完，开始评审。让 UI 显示"评审中"。
+          const d = evt.data as { platform?: PlatformKey; attempt?: number };
+          if (!d.platform) continue;
+          const p = d.platform;
+          setDraftMap((m) => {
+            const prev = m[p] ?? { status: 'streaming' as DraftPhase, content_md: '' };
+            return {
+              ...m,
+              [p]: { ...prev, critic_phase: 'reviewing', critic_attempt: d.attempt ?? 1 },
+            };
+          });
+        } else if (evt.event === 'critic') {
+          // v3.4：拿到本次评分结果
+          const d = evt.data as {
+            platform?: PlatformKey;
+            attempt?: number;
+            total?: number;
+            passed?: boolean;
+            threshold?: number;
+            scores?: Record<string, { score?: number }>;
+            weakest?: string | null;
+            rewrite_hint?: string;
+          };
+          if (!d.platform) continue;
+          const p = d.platform;
+          const compactScores: CriticScores = {};
+          if (d.scores && typeof d.scores === 'object') {
+            for (const k of ['structure', 'depth', 'analogy', 'punchline', 'taboo'] as const) {
+              const v = d.scores[k]?.score;
+              if (typeof v === 'number') compactScores[k] = v;
+            }
+          }
+          setDraftMap((m) => {
+            const prev = m[p] ?? { status: 'streaming' as DraftPhase, content_md: '' };
+            return {
+              ...m,
+              [p]: {
+                ...prev,
+                last_critic: {
+                  total: d.total ?? 0,
+                  passed: !!d.passed,
+                  threshold: d.threshold ?? 20,
+                  scores: compactScores,
+                  weakest: d.weakest ?? null,
+                  rewrite_hint: d.rewrite_hint ?? '',
+                },
+                critic_runs_count: (prev.critic_runs_count ?? 0) + 1,
+              },
+            };
+          });
+        } else if (evt.event === 'rewrite_start') {
+          // v3.4：上一稿不达标，开始重写。清掉当前 tab 内容，准备接收新 delta。
+          const d = evt.data as { platform?: PlatformKey; attempt?: number };
+          if (!d.platform) continue;
+          const p = d.platform;
+          setDraftMap((m) => {
+            const prev = m[p] ?? { status: 'streaming' as DraftPhase, content_md: '' };
+            return {
+              ...m,
+              [p]: {
+                ...prev,
+                content_md: '',
+                status: 'streaming',
+                critic_phase: 'rewriting',
+                critic_attempt: d.attempt ?? (prev.critic_attempt ?? 1) + 1,
+              },
+            };
+          });
+        } else if (evt.event === 'critic_best_of_n') {
+          // v3.4：N 次仍未达标，落库挑了最高分那稿。打个 phase 状态让 UI 友好提示。
+          const d = evt.data as { platform?: PlatformKey };
+          if (!d.platform) continue;
+          const p = d.platform;
+          setDraftMap((m) => {
+            const prev = m[p] ?? { status: 'streaming' as DraftPhase, content_md: '' };
+            return { ...m, [p]: { ...prev, critic_phase: 'best_of_n' } };
+          });
+        } else if (evt.event === 'critic_error') {
+          // v3.4：critic 自己挂了，fail-open——不阻塞主流程，前端给出陪伴文案
+          const d = evt.data as { platform?: PlatformKey; message?: string };
+          if (!d.platform) continue;
+          const p = d.platform;
+          setDraftMap((m) => {
+            const prev = m[p] ?? { status: 'streaming' as DraftPhase, content_md: '' };
+            return {
+              ...m,
+              [p]: {
+                ...prev,
+                critic_phase: undefined,
+              },
+            };
+          });
+          showToast(`「${p}」这一稿评审环节卡了一下，先把原稿留着，回头再看看`);
+        } else if (evt.event === 'platform_done') {
+          const d = evt.data as {
+            platform?: PlatformKey;
+            content_md?: string;
+            critic_final_attempt?: number;
+            critic_runs_count?: number;
+          };
+          if (!d.platform) continue;
+          const p = d.platform;
+          setDraftMap((m) => ({
+            ...m,
+            [p]: {
+              ...(m[p] ?? { content_md: '' }),
+              status: 'done',
+              content_md: d.content_md ?? (m[p]?.content_md ?? ''),
+              critic_phase: undefined,
+              critic_runs_count: d.critic_runs_count ?? m[p]?.critic_runs_count,
+            },
+          }));
+        } else if (evt.event === 'done') {
+          const d = evt.data as {
+            article_id?: string;
+            main_platform?: PlatformKey;
+            versions?: Record<string, string>;
+          };
+          if (d.article_id) setArticleId(d.article_id);
+          // 把全部平台的 md 一并塞进 refineMap，Step 7 切平台时优先用缓存（决策 4）
+          if (d.versions && typeof d.versions === 'object') {
+            const cache: Partial<Record<PlatformKey, string>> = {};
+            for (const [pk, md] of Object.entries(d.versions)) {
+              cache[pk as PlatformKey] = md;
+            }
+            setRefineMap((m) => ({ ...m, ...cache }));
+          }
+          setDraftLoading(false);
+          setDraftDone(true);
+          sawDone = true;
+        } else if (evt.event === 'error') {
+          const d = evt.data as { platform?: PlatformKey; message?: string };
+          if (d.platform) {
+            // 单平台失败 - 只标记这一条，后续平台继续
+            const p = d.platform;
+            setDraftMap((m) => ({
+              ...m,
+              [p]: {
+                status: 'error',
+                content_md: m[p]?.content_md ?? '',
+                error: d.message || '这一条没生成出来',
+              },
+            }));
+          } else {
+            // 整体级错误是终结事件（服务端出这个就收流了）；单平台错误不算，后面平台还会继续
+            setDraftError(d.message || '正文生成出了点状况');
+            setDraftLoading(false);
+            sawDone = true;
+          }
+        }
+      }
+      // 流正常关闭但没收到 done / 整体 error（比如 dev server 重启）：别让"生成中"永久卡死
+      if (!sawDone && draftCtrl.current === ctrl) {
+        setDraftError('连接断开了，可以点「重新生成」再来一次');
+        setDraftLoading(false);
+        settleUnfinishedDrafts('连接断开了，这一条没写完，点「重新生成」可以整批重来');
+      }
+    } catch (e) {
+      // 已被新一轮接管：别动状态，让新一轮自己管
+      if (draftCtrl.current !== ctrl) return;
+      if ((e as Error).name === 'AbortError') {
+        setDraftError('已中止');
+        // 把没写完的平台状态一并收敛，避免 tab 还显示"流式中"、和顶部"已中止"打架
+        settleUnfinishedDrafts('这一条中止了，点「重新生成」可以整批重来');
+      } else {
+        setDraftError((e as Error).message);
+        settleUnfinishedDrafts('生成中断了，点「重新生成」可以整批重来');
+      }
+      setDraftLoading(false);
+    }
+  }, [authors, customNotes, idea, outline, showToast, targetPlatform, targetSiteId, additionalPlatforms, gatherStatus, gatherMaterial, settleUnfinishedDrafts, articleId, draftMap]);
+
+  const stopDraft = useCallback(() => {
+    draftCtrl.current?.abort();
+  }, []);
+
+  // 主平台 md（Step 7 用作 fallback 与 refine 源稿）。
+  // 多平台模式下，主平台的 md 就是 draftMap[main].content_md；单平台模式下也走这个。
+  const draftMd = useMemo(() => {
+    const main = draftMainPlatform ?? targetPlatform ?? 'wechat';
+    return draftMap[main]?.content_md ?? '';
+  }, [draftMap, draftMainPlatform, targetPlatform]);
+
+  // Step 7：切平台 -> 优先读 refineMap（决策 4：Step 6 已经把多平台版本灌进来了）
+  //         没命中再回退调 refine 兜底
+  const refineForPlatform = useCallback(async (p: PlatformKey) => {
+    // 主平台原文：已经就是 draftMd；其它平台已在 refineMap 里：直接用
+    if (p === (targetPlatform ?? 'wechat') || refineMap[p]) {
+      setPreviewPlatform(p);
+      showToast(`已切换到 ${PLATFORM_TRAITS.find((x) => x.key === p)?.name}`);
+      return;
+    }
+    // 上一条改写还在流式中：先别再开一条，两条流的 loading 会互相打架
+    if (refineLoading) {
+      showToast('上一条改写还在路上，等它写完再切这个平台');
+      return;
+    }
+    if (!draftMd) {
+      showToast('还没有正文可改写');
+      return;
+    }
+    setPreviewPlatform(p);
+    // 半截稿清理工具：改写没走完（error / 中止 / 连接断开）时把该平台从 refineMap 摘掉，
+    // 否则残稿会被当成"已缓存成稿"，再点直接命中缓存永不重试
+    const dropPartial = () => {
+      setRefineMap((m) => {
+        const next = { ...m };
+        delete next[p];
+        return next;
+      });
+    };
+    if (refineCtrl.current) {
+      try { refineCtrl.current.abort(); } catch {/* ignore */}
+    }
+    const ctrl = new AbortController();
+    refineCtrl.current = ctrl;
+    setRefineLoading(true);
+    let acc = '';
+    try {
+      const resp = await fetch('/api/compose/refine', {
+        method: 'POST',
+        signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content_md: draftMd,
+          platform: p,
+          source_platform: targetPlatform ?? 'wechat',
+          article_id: articleId,
+        }),
+      });
+      if (!resp.body) { showToast('改写失败：没有响应'); setRefineLoading(false); return; }
+      const reader = resp.body.getReader();
+      let sawDone = false;
+      for await (const evt of readSseEvents(reader)) {
+        if (evt.event === 'chunk') {
+          const t = (evt.data as { text?: string })?.text ?? '';
+          acc += t;
+          setRefineMap((m) => ({ ...m, [p]: acc }));
+        } else if (evt.event === 'done') {
+          const d = evt.data as { content_md?: string };
+          if (d.content_md) {
+            acc = d.content_md;
+            setRefineMap((m) => ({ ...m, [p]: acc }));
+          }
+          setRefineLoading(false);
+          showToast(`已按 ${PLATFORM_TRAITS.find((x) => x.key === p)?.name} 风格改写`);
+          sawDone = true;
+        } else if (evt.event === 'error') {
+          const d = evt.data as { message?: string };
+          dropPartial();
+          showToast(d.message || '改写出错了');
+          setRefineLoading(false);
+          sawDone = true;
+        }
+      }
+      // 流正常关闭但没收到终结事件（比如 dev server 重启）：清半截稿 + 收 loading
+      if (!sawDone && refineCtrl.current === ctrl) {
+        dropPartial();
+        setRefineLoading(false);
+        showToast('连接断开了，可以再点一次重试');
+      }
+    } catch (e) {
+      // 已被新一轮接管：别动状态，让新一轮自己管
+      if (refineCtrl.current !== ctrl) return;
+      dropPartial();
+      setRefineLoading(false);
+      if ((e as Error).name !== 'AbortError') showToast((e as Error).message);
+    }
+  }, [draftMd, refineMap, refineLoading, showToast, targetPlatform, articleId]);
+
+  // 当前预览用的 markdown
+  const previewMd = useMemo(() => {
+    if (previewPlatform === (targetPlatform ?? 'wechat')) return draftMd;
+    return refineMap[previewPlatform] ?? draftMd;
+  }, [previewPlatform, refineMap, draftMd, targetPlatform]);
+  const previewHtml = useMemo(() => renderMarkdown(previewMd), [previewMd]);
+  const previewWordCount = useMemo(() => countWords(previewMd), [previewMd]);
+
+  // 导出
+  const onExport = useCallback(async (kind: ExportButton) => {
+    if (!previewMd) { showToast('还没有正文可导出'); return; }
+    const name = safeExportName(previewMd);
+    try {
+      if (kind.format === 'md') {
+        downloadBlob(new Blob([previewMd], { type: 'text/markdown;charset=utf-8' }), `${name}.md`);
+      } else if (kind.format === 'html') {
+        const documentHtml = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${name}</title></head><body>${previewHtml}</body></html>`;
+        downloadBlob(new Blob([documentHtml], { type: 'text/html;charset=utf-8' }), `${name}-公众号.html`);
+      } else if (kind.format === 'txt') {
+        downloadBlob(new Blob([markdownToPlainText(previewMd)], { type: 'text/plain;charset=utf-8' }), `${name}.txt`);
+      } else {
+        await exportXhsLongImage(previewMd);
+      }
+      showToast(kind.toast);
+    } catch (error) {
+      showToast((error as Error).message || '导出时出了点状况');
+    }
+  }, [previewMd, previewHtml, showToast]);
+
+  // 推荐 stream 自动滚动（如果还在 streaming）
+  const recommendScrollRef = useRef<HTMLPreElement | null>(null);
+  useEffect(() => {
+    const el = recommendScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [recommendStream]);
+
+  const outlineRawRef = useRef<HTMLPreElement | null>(null);
+  useEffect(() => {
+    const el = outlineRawRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [outlineStream]);
+
+  // 当前正在写的章节：基于 active tab 的 md 计算（决策 3：左侧大纲跟当前 tab）
+  const activeDraftMd = useMemo(() => {
+    if (!activeDraftTab) return '';
+    return draftMap[activeDraftTab]?.content_md ?? '';
+  }, [activeDraftTab, draftMap]);
+  const activeDraftEntry = useMemo(() => {
+    if (!activeDraftTab) return null;
+    return draftMap[activeDraftTab] ?? null;
+  }, [activeDraftTab, draftMap]);
+  const currentSectionIdx = useMemo(() => {
+    if (!outline) return -1;
+    // 切到尚未开始的 tab 时，不高亮任何章节（决策 3）
+    if (!activeDraftEntry || activeDraftEntry.status === 'pending') return -1;
+    const headings = (activeDraftMd.match(/^##\s+/gm) ?? []).length;
+    return Math.max(0, Math.min(headings - 1, outline.sections.length - 1));
+  }, [activeDraftMd, outline, activeDraftEntry]);
+
+  return (
+    <>
+      <ComposeNav currentLabel={stepLabel(step)} saveHint={articleId ? '已保存到本地' : undefined} />
+      <main className="workbench">
+        <Stepper current={step} onJump={(t) => {
+          // 允许回退到已完成的步骤
+          if (t < step) {
+            // 回跳先掐断所有在途流，避免旧流回来和新一轮交错（gather 是后台任务，不掐）
+            abortInflightStreams();
+            // 软等待中的 outline 一并取消，防止 gather 完成后在后台隐形触发 outline fetch
+            setOutlineWaitingForGather(false);
+            setStep(t);
+          }
+        }} />
+
+        {step === 1 && (
+          <Step1Platform
+            value={targetPlatform}
+            siteId={targetSiteId}
+            additionalPlatforms={additionalPlatforms}
+            onChange={(k, sid) => {
+              setTargetPlatform(k);
+              setTargetSiteId(sid ?? null);
+              // 切了主平台之后，把 additional 里和主平台重复的去掉
+              setAdditionalPlatforms((arr) => arr.filter((p) => p !== k));
+            }}
+            onToggleAdditional={(k) => {
+              setAdditionalPlatforms((arr) => {
+                if (arr.includes(k)) return arr.filter((x) => x !== k);
+                return [...arr, k];
+              });
+            }}
+            onNext={goFromPlatformToIdea}
+          />
+        )}
+
+        {step === 2 && (
+          <Step2Idea
+            idea={idea}
+            onChange={setIdea}
+            wordCount={ideaWordCount}
+            onNext={goRecommend}
+            onChip={(s) => setIdea(s)}
+            onBack={() => setStep(1)}
+            targetPlatform={targetPlatform}
+          />
+        )}
+
+        {step === 3 && (
+          <Step3Recommend
+            loading={recommendLoading}
+            error={recommendError}
+            recommendations={recommendations}
+            stream={recommendStream}
+            streamRef={recommendScrollRef}
+            picked={pickedRec}
+            onPick={pickRecommendation}
+            onSkip={skipRecommendation}
+            onBack={() => setStep(2)}
+            onRetry={goRecommend}
+            emptyLibrary={emptyLibrary}
+            targetPlatform={targetPlatform}
+          />
+        )}
+
+        {step === 4 && (
+          <RecipePickerPanel
+            platformKey={targetPlatform}
+            selectedRecipeId={selectedRecipeId}
+            onSelect={(recipeId, recipeNotes) => {
+              setSelectedRecipeId(recipeId);
+              if (recipeNotes !== null) {
+                setCustomNotes((prev) => {
+                  // 把配方块追加到现有备注里，用分隔线区分
+                  const stripped = prev.replace(/\n*---\n# 风格配方 ·[\s\S]*$/, '').trim();
+                  return stripped ? `${stripped}\n\n---\n${recipeNotes}` : recipeNotes;
+                });
+              } else {
+                // 取消选择：清掉之前注入的块
+                setCustomNotes((prev) =>
+                  prev.replace(/\n*---\n# 风格配方 ·[\s\S]*$/, '').trim(),
+                );
+              }
+            }}
+          />
+        )}
+
+        {step === 4 && (
+          <Step4Tune
+            authors={authors}
+            setAuthors={setAuthors}
+            customNotes={customNotes}
+            setCustomNotes={setCustomNotes}
+            onBack={() => setStep(3)}
+            onNext={goOutline}
+          />
+        )}
+
+        {step === 4 && (
+          <InspirationPanel
+            category={inspirationCategory}
+            onCategoryChange={setInspirationCategory}
+            platform={targetPlatform}
+            items={inspirationItems}
+            loading={inspirationLoading}
+            open={inspirationOpen}
+            onToggle={() => setInspirationOpen((v) => !v)}
+          />
+        )}
+
+        {/* v3.5 · 后台 codex 搜集进度卡：Step 3-5 都可见，让用户随时看到"事实底座"在后台跑 */}
+        {(step === 3 || step === 4 || step === 5) && gatherStatus !== 'idle' && (
+          <GatherStatusCard
+            status={gatherStatus}
+            chars={gatherChars}
+            material={gatherMaterial}
+            startedAt={gatherStartedAt}
+            elapsedMs={gatherElapsedMs}
+            fromCache={gatherFromCache}
+            error={gatherError}
+            onSkip={() => {
+              if (gatherCtrl.current) {
+                try { gatherCtrl.current.abort(); } catch {/* ignore */}
+              }
+              setGatherStatus('skipped');
+            }}
+            onRetry={() => {
+              gatherCurrentIdeaRef.current = ''; // 强制重启
+              kickoffGather(idea);
+            }}
+          />
+        )}
+
+        {/* v3.5 · 软等待面板：进入 Step 5 但 gather 还没好时，用户停在这等 */}
+        {step === 5 && outlineWaitingForGather && (
+          <OutlineWaitPanel
+            startedAt={gatherStartedAt}
+            onSkip={skipOutlineWait}
+            onBack={() => {
+              setOutlineWaitingForGather(false);
+              setStep(4);
+            }}
+          />
+        )}
+
+        {step === 5 && !outlineWaitingForGather && (
+          <Step5Outline
+            loading={outlineLoading}
+            outline={outline}
+            setOutline={setOutline}
+            stream={outlineStream}
+            streamRef={outlineRawRef}
+            error={outlineError}
+            onBack={() => setStep(4)}
+            onRetry={goOutline}
+            onNext={goDraft}
+          />
+        )}
+
+        {step === 6 && (
+          <Step6Draft
+            outline={outline}
+            platforms={draftPlatforms}
+            mainPlatform={draftMainPlatform}
+            draftMap={draftMap}
+            activeTab={activeDraftTab}
+            onActiveTabChange={setActiveDraftTab}
+            loading={draftLoading}
+            done={draftDone}
+            error={draftError}
+            currentSectionIdx={currentSectionIdx}
+            scrollRefs={draftScrollRefs}
+            onStop={stopDraft}
+            onRetry={() => { void goDraft(); }}
+            onRetryFailed={(platforms) => { void goDraft(platforms); }}
+            onBack={() => setStep(5)}
+            onNext={() => setStep(7)}
+          />
+        )}
+
+        {step === 7 && (
+          <Step7Preview
+            previewMd={previewMd}
+            previewHtml={previewHtml}
+            previewWordCount={previewWordCount}
+            layout={layout}
+            setLayout={setLayout}
+            platform={previewPlatform}
+            targetPlatform={targetPlatform}
+            onPlatform={refineForPlatform}
+            refineLoading={refineLoading}
+            panels={panels}
+            togglePanel={(k) => setPanels((p) => ({ ...p, [k]: !p[k] }))}
+            onExport={onExport}
+            onBack={() => setStep(6)}
+            showToast={showToast}
+            articleId={articleId}
+            chosenRecommendation={chosenRecommendation}
+            draftMd={draftMd}
+          />
+        )}
+      </main>
+      <Toast visible={toast.visible} message={toast.message} />
+    </>
+  );
+}
+
+function stepLabel(step: Step): string {
+  return STEPS.find((s) => s.n === step)?.label ?? '写新文章';
+}
+
+// ================== Sub Components ==================
+
+function Stepper({ current, onJump }: { current: Step; onJump: (s: Step) => void }) {
+  return (
+    <div className="workbench-stepper">
+      {STEPS.map((s, i) => (
+        <span key={s.n} style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          <button
+            type="button"
+            className={
+              'workbench-step ' +
+              (s.n === current ? 'active' : s.n < current ? 'completed clickable' : '')
+            }
+            onClick={() => s.n < current && onJump(s.n)}
+            disabled={s.n > current}
+          >
+            <span className="workbench-step-num">{s.n}</span>
+            {s.label}
+          </button>
+          {i < STEPS.length - 1 && <span className="workbench-step-divider" />}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// ---------- Step 1 · 选目标平台（实例化为「站点画像 卡片 + 通用画像 卡片」混排）----------
+interface SitePickerItem {
+  kind: 'site' | 'generic';
+  platform_key: PlatformKey;
+  site_id?: string;
+  site_name?: string;
+  section?: string | null;
+  sample_count?: number;
+  title?: string;
+  word_range_min: number | null;
+  word_range_max: number | null;
+  tone_hint?: string | null;
+  tone_tag?: string;
+  pacing?: string;
+  ui_hint?: string;
+  preferred_topics?: string[];
+}
+
+function Step1Platform({
+  value, siteId, additionalPlatforms, onChange, onToggleAdditional, onNext,
+}: {
+  value: PlatformKey | null;
+  siteId: string | null;
+  additionalPlatforms: PlatformKey[];
+  onChange: (k: PlatformKey, sid?: string | null) => void;
+  onToggleAdditional: (k: PlatformKey) => void;
+  onNext: () => void;
+}) {
+  const [items, setItems] = useState<SitePickerItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    fetch('/api/sites/picker')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d: { items: SitePickerItem[] }) => {
+        setItems(d.items ?? []);
+        setError(null);
+      })
+      .catch((e) => setError((e as Error).message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const picked = value ? getPlatform(value) : null;
+  const pickedItem = items.find((it) =>
+    siteId ? it.kind === 'site' && it.site_id === siteId : it.kind === 'generic' && it.platform_key === value,
+  );
+
+  return (
+    <section className="step-card">
+      <p className="step-card-eyebrow">STEP 01 · TARGET PLATFORM</p>
+      <h1 className="step-card-title">这篇要发到哪儿？</h1>
+      <p className="step-card-sub">
+        每张「站点画像」卡都是你拆过的具体板块——选了它，写大纲和正文就会按这个板块的篇幅、调性、开篇套路来调。没拆过的平台用通用画像兜底。
+        <a
+          href="/sites/new"
+          style={{ marginLeft: 8, color: 'var(--accent)', textDecoration: 'underline' }}
+        >
+          + 去拆一个新板块
+        </a>
+      </p>
+
+      {loading && <div style={{ opacity: 0.6, padding: 16 }}>加载站点画像…</div>}
+      {error && (
+        <div style={{ color: 'var(--danger, #c0392b)' }}>拉取失败：{error}</div>
+      )}
+
+      {!loading && items.length > 0 && (
+        <div className="platform-picker-grid">
+          {items.map((it) => {
+            const active = it.kind === 'site'
+              ? it.site_id === siteId
+              : it.platform_key === value && !siteId;
+            return (
+              <button
+                key={it.kind === 'site' ? `site-${it.site_id}` : `generic-${it.platform_key}`}
+                type="button"
+                className={'platform-picker-card' + (active ? ' active' : '')}
+                onClick={() => onChange(it.platform_key, it.site_id ?? null)}
+                onDoubleClick={() => {
+                  onChange(it.platform_key, it.site_id ?? null);
+                  onNext();
+                }}
+              >
+                <div className="platform-picker-card-head">
+                  <span className="platform-picker-name">
+                    {it.kind === 'site' ? it.site_name : it.title}
+                  </span>
+                  <span className="platform-picker-tag">
+                    {it.kind === 'site' ? `${it.sample_count} 篇样本` : it.tone_tag}
+                  </span>
+                </div>
+                {it.kind === 'site' && it.section && (
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--text-muted)',
+                      marginBottom: 6,
+                    }}
+                  >
+                    {it.section}
+                  </div>
+                )}
+                {it.word_range_min && it.word_range_max && (
+                  <div className="platform-picker-range">
+                    {it.word_range_min.toLocaleString()}–{it.word_range_max.toLocaleString()} 字
+                  </div>
+                )}
+                {it.kind === 'site' ? (
+                  <>
+                    {it.tone_hint && (
+                      <div className="platform-picker-pacing">{it.tone_hint}…</div>
+                    )}
+                    {it.preferred_topics && it.preferred_topics.length > 0 && (
+                      <div
+                        className="platform-picker-hint"
+                        style={{ fontSize: 11, opacity: 0.7 }}
+                      >
+                        常写：{it.preferred_topics.slice(0, 2).join(' / ')}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div className="platform-picker-pacing">{it.pacing}</div>
+                    <div className="platform-picker-hint">{it.ui_hint}</div>
+                  </>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {pickedItem && (
+        <div style={{
+          background: 'var(--surface-light)',
+          border: '1px solid var(--border)',
+          borderRadius: 10,
+          padding: '12px 16px',
+          fontSize: 12,
+          color: 'var(--text-secondary)',
+          lineHeight: 1.7,
+          marginTop: 12,
+        }}>
+          <strong style={{ color: 'var(--text)', fontFamily: 'var(--font-display)', fontWeight: 500 }}>
+            已选「{pickedItem.kind === 'site' ? pickedItem.site_name : pickedItem.title}」
+            {pickedItem.kind === 'site' && pickedItem.section ? ` · ${pickedItem.section}` : ''}
+          </strong>
+          {picked && (
+            <>
+              ：基础平台「{picked.name}」 · 建议 {pickedItem.word_range_min?.toLocaleString()}–{pickedItem.word_range_max?.toLocaleString()} 字 · {picked.voice}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* 顺手出这些版本（决策 1）：主平台默认勾且不可取消，非主平台 chip 多选 */}
+      {value && (
+        <section
+          style={{
+            marginTop: 16,
+            padding: '14px 18px',
+            border: '1px dashed var(--border-medium)',
+            borderRadius: 10,
+            background: 'var(--surface)',
+          }}
+        >
+          <p
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 11,
+              color: 'var(--text-muted)',
+              letterSpacing: '0.06em',
+              margin: '0 0 8px',
+            }}
+          >
+            ALSO PUBLISH TO · 顺手出这些版本
+          </p>
+          <p
+            style={{
+              fontSize: 12,
+              color: 'var(--text-tertiary)',
+              margin: '0 0 10px',
+              lineHeight: 1.6,
+            }}
+          >
+            主平台用上面挑的站点画像写；顺手出的版本只按平台通用调性写，省得到了 Step 7 再一篇一篇改写。
+          </p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {PLATFORM_TRAITS.map((p) => {
+              const isMain = p.key === value;
+              const active = isMain || additionalPlatforms.includes(p.key);
+              return (
+                <button
+                  key={p.key}
+                  type="button"
+                  className="idea-chip"
+                  onClick={() => {
+                    if (isMain) return; // 主平台默认勾不可取消
+                    onToggleAdditional(p.key);
+                  }}
+                  disabled={isMain}
+                  style={
+                    active
+                      ? {
+                          background: 'var(--surface-white)',
+                          color: 'var(--text)',
+                          borderColor: 'var(--border-medium)',
+                          cursor: isMain ? 'default' : 'pointer',
+                          opacity: isMain ? 0.85 : 1,
+                        }
+                      : { cursor: 'pointer' }
+                  }
+                  title={isMain ? '主平台默认就出，没法取消' : `点一下${active ? '取消' : '加上'}：${p.name}`}
+                >
+                  {p.name}
+                  {isMain && (
+                    <span
+                      style={{
+                        marginLeft: 6,
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 10,
+                        color: 'var(--text-muted)',
+                        letterSpacing: '0.05em',
+                      }}
+                    >
+                      主
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          {additionalPlatforms.length > 0 && (
+            <p
+              style={{
+                marginTop: 10,
+                fontSize: 12,
+                color: 'var(--text-muted)',
+                fontFamily: 'var(--font-mono)',
+                letterSpacing: '0.05em',
+              }}
+            >
+              这次会写 {1 + additionalPlatforms.length} 份正文（主平台 + {additionalPlatforms.length} 个顺手版）· 串行生成
+            </p>
+          )}
+        </section>
+      )}
+
+      <div className="step-actions">
+        <div className="step-actions-left" />
+        <div className="step-actions-right">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={onNext}
+            disabled={!value}
+          >
+            写题材思路 <span className="btn-arrow">→</span>
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ---------- Step 2 · 题材 ----------
+function Step2Idea({
+  idea, onChange, wordCount, onNext, onChip, onBack, targetPlatform,
+}: {
+  idea: string;
+  onChange: (s: string) => void;
+  wordCount: number;
+  onNext: () => void;
+  onChip: (s: string) => void;
+  onBack: () => void;
+  targetPlatform: PlatformKey | null;
+}) {
+  const picked = targetPlatform ? getPlatform(targetPlatform) : null;
+  return (
+    <section className="step-card">
+      <p className="step-card-eyebrow">STEP 02 · IDEA</p>
+      <h1 className="step-card-title">今天想写点什么？</h1>
+      <p className="step-card-sub">
+        {picked
+          ? `目标平台是「${picked.name}」（${picked.word_range_min.toLocaleString()}–${picked.word_range_max.toLocaleString()} 字）。把题材、角度、核心观点丢进来，越具体越好。`
+          : '把题材、你想说的角度、想表达的核心观点都丢进来，越具体越好。'}
+      </p>
+      <textarea
+        className="workbench-textarea"
+        placeholder="例如：想写一篇关于…&#10;我的角度是…&#10;核心观点：…"
+        value={idea}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <div className="idea-meta">
+        <span>当前 {wordCount} 字 · 至少 30 字才能进入下一步</span>
+        <span>{wordCount >= 30 ? '可以下一步' : `还差 ${30 - wordCount} 字`}</span>
+      </div>
+      <div>
+        <p style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.06em', margin: '0 0 8px' }}>
+          没想好？挑一条试试
+        </p>
+        <div className="idea-chips">
+          {IDEA_CHIPS.map((c, i) => (
+            <button key={i} type="button" className="idea-chip" onClick={() => onChip(c)}>
+              {c.slice(0, 22)}…
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="step-actions">
+        <div className="step-actions-left">
+          <button type="button" className="btn btn-ghost" onClick={onBack}>← 改目标平台</button>
+        </div>
+        <div className="step-actions-right">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={onNext}
+            disabled={wordCount < 30}
+          >
+            推荐风格 <span className="btn-arrow">→</span>
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ---------- Step 3 · 推荐风格 ----------
+function Step3Recommend({
+  loading, error, recommendations, stream, streamRef, picked, onPick, onSkip, onBack, onRetry, emptyLibrary, targetPlatform,
+}: {
+  loading: boolean;
+  error: string | null;
+  recommendations: RecommendCard[];
+  stream: string;
+  streamRef: React.RefObject<HTMLPreElement | null>;
+  picked: number | null;
+  onPick: (i: number) => void;
+  onSkip: () => void;
+  onBack: () => void;
+  onRetry: () => void;
+  emptyLibrary: boolean;
+  targetPlatform: PlatformKey | null;
+}) {
+  const platformName = targetPlatform ? getPlatform(targetPlatform).name : null;
+  return (
+    <section className="step-card">
+      <p className="step-card-eyebrow">STEP 03 · STYLE RECOMMENDATIONS</p>
+      <h1 className="step-card-title">为你挑了几套写作风格</h1>
+      <p className="step-card-sub">
+        {platformName
+          ? `这是基于你的题材 + 目标平台「${platformName}」+ 指纹库里所有博主推荐的组合。匹配档位徽章会标出每位博主在目标平台的契合度。`
+          : '这是基于你这次题材 + 指纹库里所有博主推荐的组合。单个博主、多个博主融合都有。直接选一个，或者跳过让自己挑。'}
+      </p>
+
+      {emptyLibrary && (
+        <Banner kind="info" title="指纹库还是空的">
+          先去拆几位博主再回来就能用了。这次先用通用风格继续。
+        </Banner>
+      )}
+
+      {loading && (
+        <>
+          <Banner kind="loading" title="模型正在挑选…">
+            正在通读所有指纹，给你筛 3 套互不相同的风格。第一次推荐通常需要 30-60 秒。
+          </Banner>
+          <pre ref={streamRef} className="outline-stream-raw">{stream || '...'}</pre>
+        </>
+      )}
+
+      {!loading && error && (
+        <Banner kind="error" title="模型这次没接住">
+          {error}
+          <div style={{ marginTop: 10 }}>
+            <button type="button" className="btn btn-secondary" onClick={onRetry}>
+              <RetryIcon /> 再试一次
+            </button>
+          </div>
+        </Banner>
+      )}
+
+      {!loading && !error && recommendations.length > 0 && (
+        <div className="recommend-grid">
+          {recommendations.map((r, i) => (
+            <div
+              key={i}
+              className={'recommend-card' + (picked === i ? ' selected' : '')}
+              onClick={() => onPick(i)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPick(i); } }}
+            >
+              <div className="recommend-card-head">
+                <h3 className="recommend-card-title">{r.label || `推荐组合 ${i + 1}`}</h3>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {r.platform_match_quality && targetPlatform && (
+                    <MatchBadge q={r.platform_match_quality} />
+                  )}
+                  <span className="recommend-card-count">{r.selected_authors.length} 位博主</span>
+                </div>
+              </div>
+              <div className="recommend-authors">
+                {r.selected_authors.map((a, j) => (
+                  <span key={j} className="recommend-author-chip">
+                    <strong>{a.fingerprint_id.slice(0, 6)}</strong> · {Math.round(a.weight * 100)}%
+                  </span>
+                ))}
+              </div>
+              <p className="recommend-summary">{r.composition_summary}</p>
+              <p className="recommend-why">{r.why_match}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="step-actions">
+        <div className="step-actions-left">
+          <button type="button" className="btn btn-ghost" onClick={onBack}>← 返回</button>
+        </div>
+        <div className="step-actions-right">
+          <button type="button" className="btn btn-secondary" onClick={onSkip}>
+            {emptyLibrary ? '使用通用风格继续' : '我自己挑'} <span className="btn-arrow">→</span>
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ---------- Step 4 · 微调组合 ----------
+function Step4Tune({
+  authors, setAuthors, customNotes, setCustomNotes, onBack, onNext,
+}: {
+  authors: SelectedAuthor[];
+  setAuthors: React.Dispatch<React.SetStateAction<SelectedAuthor[]>>;
+  customNotes: string;
+  setCustomNotes: (s: string) => void;
+  onBack: () => void;
+  onNext: () => void;
+}) {
+  const activeCount = authors.filter((a) => a.enabled).length;
+  return (
+    <section className="step-card">
+      <p className="step-card-eyebrow">STEP 04 · TUNE COMPOSITION</p>
+      <h1 className="step-card-title">微调风格组合</h1>
+      <p className="step-card-sub">
+        每位博主的占比都可以拖。你也可以勾掉不想要的，留一个核心博主就够。
+        {activeCount === 0 && '（至少保留一位）'}
+      </p>
+
+      {authors.length === 0 && (
+        <Banner kind="info" title="没有具体博主">
+          这次会用通用写作风格生成。你也可以返回上一步选一个推荐组合。
+        </Banner>
+      )}
+
+      {authors.length > 0 && (
+        <div className="tune-grid">
+          {authors.map((a, i) => (
+            <div key={a.fingerprint_id} className={'tune-row' + (a.enabled ? '' : ' disabled')}>
+              <input
+                type="checkbox"
+                checked={a.enabled}
+                onChange={(e) => setAuthors((arr) => arr.map((x, j) => (j === i ? { ...x, enabled: e.target.checked } : x)))}
+                aria-label="启用此博主"
+              />
+              <div>
+                <div className="tune-row-name">{a.author_name}</div>
+                <div className="tune-row-platform">{a.platform || '未标平台'} · {a.reason ?? ''}</div>
+              </div>
+              <input
+                type="range" min={0} max={100}
+                value={Math.round(a.weight * 100)}
+                onChange={(e) => setAuthors((arr) => arr.map((x, j) => (j === i ? { ...x, weight: Number(e.target.value) / 100 } : x)))}
+                disabled={!a.enabled}
+              />
+              <span className="tune-row-weight">{Math.round(a.weight * 100)}%</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="outline-meta-field" style={{ marginTop: 8 }}>
+        <label>额外调整说明（可选）</label>
+        <textarea
+          value={customNotes}
+          onChange={(e) => setCustomNotes(e.target.value)}
+          placeholder="例如：希望开篇更冷一点 / 不要金句堆砌 / 收尾保留留白"
+        />
+      </div>
+
+      <div className="step-actions">
+        <div className="step-actions-left">
+          <button type="button" className="btn btn-ghost" onClick={onBack}>← 返回推荐</button>
+        </div>
+        <div className="step-actions-right">
+          <button type="button" className="btn btn-primary" onClick={onNext}>
+            生成大纲 <span className="btn-arrow">→</span>
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ---------- Step 5 · 生成大纲 ----------
+const STRUCTURE_SHAPE_LABEL: Record<NonNullable<Outline['structure_shape']>, string> = {
+  causal_chain: '因果链',
+  dual_contrast: '双线对比',
+  concentric: '同心圆',
+  flat_list: '平铺列举',
+  timeline: '时间轴',
+  problem_solution: '问题→方案',
+};
+
+const DEPTH_ROLE_LABEL: Record<NonNullable<OutlineSection['depth_role']>, string> = {
+  open: '开篇',
+  deeper: '挖深一层',
+  parallel: '并列补充',
+  turn: '反转',
+  close: '收尾',
+};
+
+function Step5Outline({
+  loading, outline, setOutline, stream, streamRef, error, onBack, onRetry, onNext,
+}: {
+  loading: boolean;
+  outline: Outline | null;
+  setOutline: (o: Outline) => void;
+  stream: string;
+  streamRef: React.RefObject<HTMLPreElement | null>;
+  error: string | null;
+  onBack: () => void;
+  onRetry: () => void;
+  onNext: () => void;
+}) {
+  return (
+    <section className="step-card">
+      <p className="step-card-eyebrow">STEP 05 · OUTLINE</p>
+      <h1 className="step-card-title">先把骨架搭起来</h1>
+      <p className="step-card-sub">
+        正文还没开写，先确认大纲。每个章节都可以改字、调字数、删要点。骨架定了，肉就好填。
+      </p>
+
+      {loading && (
+        <>
+          <Banner kind="loading" title="模型正在写大纲…">
+            通常 20-45 秒能出来。下面是原始流式输出，方便你早点感知模型的思路方向。
+          </Banner>
+          <pre ref={streamRef} className="outline-stream-raw">{stream || '...'}</pre>
+        </>
+      )}
+
+      {!loading && error && (
+        <Banner kind="error" title="大纲没生成出来">
+          {error}
+          <div style={{ marginTop: 10 }}>
+            <button type="button" className="btn btn-secondary" onClick={onRetry}>
+              <RetryIcon /> 再试一次
+            </button>
+          </div>
+        </Banner>
+      )}
+
+      {!loading && outline && (
+        <div className="outline-editor">
+          {(outline.structure_shape || outline.core_thesis) && (
+            <div style={{ marginBottom: 12 }}>
+              {outline.structure_shape && (
+                <span className="tag" style={{ marginRight: 8 }}>
+                  {STRUCTURE_SHAPE_LABEL[outline.structure_shape]}
+                </span>
+              )}
+              {outline.core_thesis && (
+                <blockquote style={{
+                  margin: '8px 0 0',
+                  padding: '6px 12px',
+                  borderLeft: '3px solid var(--accent, #999)',
+                  fontSize: 13,
+                  color: 'var(--text-muted)',
+                  fontStyle: 'italic',
+                }}>
+                  {outline.core_thesis}
+                </blockquote>
+              )}
+            </div>
+          )}
+          <div className="outline-meta">
+            <div className="outline-meta-field">
+              <label>工作标题</label>
+              <input
+                value={outline.working_title}
+                onChange={(e) => setOutline({ ...outline, working_title: e.target.value })}
+              />
+            </div>
+            <div className="outline-meta-field">
+              <label>预计总字数</label>
+              <input
+                type="number"
+                value={outline.total_words_estimate}
+                onChange={(e) => setOutline({ ...outline, total_words_estimate: Number(e.target.value) || 0 })}
+              />
+            </div>
+          </div>
+          <div className="outline-meta">
+            <div className="outline-meta-field">
+              <label>开篇思路</label>
+              <textarea
+                value={outline.hook_idea}
+                onChange={(e) => setOutline({ ...outline, hook_idea: e.target.value })}
+              />
+            </div>
+            <div className="outline-meta-field">
+              <label>收尾思路</label>
+              <textarea
+                value={outline.closing_idea}
+                onChange={(e) => setOutline({ ...outline, closing_idea: e.target.value })}
+              />
+            </div>
+          </div>
+
+          <p style={{ margin: '8px 0 0', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)', letterSpacing: '0.06em' }}>
+            章节（{outline.sections.length}）
+          </p>
+          {outline.sections.map((s, i) => (
+            <div key={i} className="outline-section-card">
+              <div className="outline-section-head">
+                <span className="outline-section-num">{i + 1}</span>
+                <input
+                  className="outline-section-title"
+                  value={s.title}
+                  onChange={(e) => {
+                    const next = { ...outline };
+                    next.sections = [...next.sections];
+                    next.sections[i] = { ...next.sections[i], title: e.target.value };
+                    setOutline(next);
+                  }}
+                />
+                {s.depth_role && (
+                  <span className="tag" style={{ marginLeft: 6, fontSize: 11 }}>
+                    {DEPTH_ROLE_LABEL[s.depth_role]}
+                  </span>
+                )}
+                <input
+                  className="outline-section-budget"
+                  type="number"
+                  value={s.word_budget}
+                  onChange={(e) => {
+                    const next = { ...outline };
+                    next.sections = [...next.sections];
+                    next.sections[i] = { ...next.sections[i], word_budget: Number(e.target.value) || 0 };
+                    setOutline(next);
+                  }}
+                />
+              </div>
+              {s.thesis && (
+                <p style={{
+                  margin: '4px 0 6px 32px',
+                  fontSize: 12,
+                  fontStyle: 'italic',
+                  color: 'var(--text-muted)',
+                }}>
+                  {s.thesis}
+                </p>
+              )}
+              <ul className="outline-bullet-list">
+                {s.bullets.map((b, j) => (
+                  <li key={j} className="outline-bullet">{b}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="step-actions">
+        <div className="step-actions-left">
+          <button type="button" className="btn btn-ghost" onClick={onBack}>← 返回</button>
+          {!loading && outline && (
+            <button type="button" className="btn btn-secondary" onClick={onRetry}>
+              <RetryIcon /> 重新生成大纲
+            </button>
+          )}
+        </div>
+        <div className="step-actions-right">
+          <button type="button" className="btn btn-primary" onClick={onNext} disabled={!outline || loading}>
+            开始写正文 <span className="btn-arrow">→</span>
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ---------- Step 6 · 流式正文（多平台 tab） ----------
+type Step6DraftPhase = 'pending' | 'streaming' | 'done' | 'error';
+interface Step6CriticScores {
+  structure?: number;
+  depth?: number;
+  analogy?: number;
+  punchline?: number;
+  taboo?: number;
+}
+interface Step6DraftEntry {
+  status: Step6DraftPhase;
+  content_md: string;
+  error?: string;
+  // v3.4 · Reflection Loop 实时状态
+  critic_attempt?: number;
+  critic_phase?: 'writing' | 'reviewing' | 'rewriting' | 'best_of_n';
+  last_critic?: {
+    total: number;
+    passed: boolean;
+    threshold: number;
+    scores: Step6CriticScores;
+    weakest: string | null;
+    rewrite_hint: string;
+  };
+  critic_runs_count?: number;
+}
+
+function Step6Draft({
+  outline, platforms, mainPlatform, draftMap, activeTab, onActiveTabChange,
+  loading, done, error, currentSectionIdx, scrollRefs,
+  onStop, onRetry, onRetryFailed, onBack, onNext,
+}: {
+  outline: Outline | null;
+  platforms: PlatformKey[];
+  mainPlatform: PlatformKey | null;
+  draftMap: Partial<Record<PlatformKey, Step6DraftEntry>>;
+  activeTab: PlatformKey | null;
+  onActiveTabChange: (p: PlatformKey) => void;
+  loading: boolean;
+  done: boolean;
+  error: string | null;
+  currentSectionIdx: number;
+  scrollRefs: React.MutableRefObject<Partial<Record<PlatformKey, HTMLDivElement | null>>>;
+  onStop: () => void;
+  onRetry: () => void;
+  onRetryFailed: (platforms: PlatformKey[]) => void;
+  onBack: () => void;
+  onNext: () => void;
+}) {
+  // 触发首次 generation
+  useEffect(() => {
+    const hasAny = platforms.some((p) => (draftMap[p]?.content_md ?? '').length > 0);
+    if (!loading && !done && !error && !hasAny) {
+      onRetry();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const activeEntry: Step6DraftEntry | undefined = activeTab ? draftMap[activeTab] : undefined;
+  const activeMd = activeEntry?.content_md ?? '';
+  const isActiveStreaming = activeEntry?.status === 'streaming';
+
+  // 全局字数统计：所有平台 md 字数求和
+  const totalWords = useMemo(
+    () => Object.values(draftMap).reduce((s, e) => s + (e ? countWords(e.content_md) : 0), 0),
+    [draftMap],
+  );
+
+  // 顶部 status 文案：考虑多平台进度
+  const doneCount = platforms.filter((p) => draftMap[p]?.status === 'done').length;
+  const failedPlatforms = platforms.filter((p) => draftMap[p]?.status === 'error');
+  const statusText = (() => {
+    if (!platforms.length) return '空闲';
+    if (loading) {
+      if (platforms.length > 1) {
+        return `正在写第 ${doneCount + 1} / ${platforms.length} 个平台…  共 ${totalWords} 字`;
+      }
+      return `正在写…  已 ${totalWords} 字`;
+    }
+    if (done) {
+      if (platforms.length > 1) return `${platforms.length} 个平台都写完了 · 共 ${totalWords} 字`;
+      return `写完了 · 共 ${totalWords} 字`;
+    }
+    return '空闲';
+  })();
+
+  return (
+    <section className="step-card">
+      <p className="step-card-eyebrow">STEP 06 · STREAM DRAFT</p>
+      <h1 className="step-card-title">
+        {platforms.length > 1 ? `按大纲，依次写 ${platforms.length} 个平台版本` : '正在按大纲写正文'}
+      </h1>
+      <p className="step-card-sub">
+        {platforms.length > 1
+          ? '一个个串行写，主平台最先出。顶部 tab 可以提前切过去看进度，左侧大纲跟着当前 tab 走。'
+          : '左侧高亮当前正在写的章节，右侧是实时输出。可以随时中止 / 重新生成。'}
+      </p>
+
+      <div className="draft-stream-controls">
+        <span className={'draft-status-dot ' + (loading ? '' : done ? 'done' : 'idle')} />
+        <span className="draft-status-text">{statusText}</span>
+        <div style={{ flex: 1 }} />
+        {loading && (
+          <button type="button" className="btn btn-ghost" onClick={onStop}>
+            中止
+          </button>
+        )}
+        {!loading && (
+          <>
+            {failedPlatforms.length > 0 && (
+              <button type="button" className="btn btn-primary" onClick={() => onRetryFailed(failedPlatforms)}>
+                <RetryIcon /> 仅重试失败的 {failedPlatforms.length} 个平台
+              </button>
+            )}
+            <button type="button" className="btn btn-ghost" onClick={onRetry}>
+              <RetryIcon /> 全部重新生成
+            </button>
+          </>
+        )}
+      </div>
+
+      {error && !loading && (
+        <Banner kind="error" title="生成中断">
+          {error}
+        </Banner>
+      )}
+
+      {/* tab bar：每个平台一个 tab，显示状态。单平台时也显示一行 tab，整体一致。 */}
+      {platforms.length > 0 && (
+        <div
+          role="tablist"
+          aria-label="平台版本"
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 6,
+            padding: '8px 10px',
+            background: 'var(--surface)',
+            border: '1px solid var(--border)',
+            borderRadius: 10,
+            marginBottom: 12,
+          }}
+        >
+          {platforms.map((p) => {
+            const entry = draftMap[p];
+            const status = entry?.status ?? 'pending';
+            const isActive = p === activeTab;
+            const isMain = p === mainPlatform;
+            const wordCount = entry ? countWords(entry.content_md) : 0;
+            // v3.4：critic_phase 优先级高于 status，让 UI 显示更具体的阶段
+            const cPhase = entry?.critic_phase;
+            const cAttempt = entry?.critic_attempt;
+            let statusLabel: string;
+            if (status === 'pending') statusLabel = '排队中';
+            else if (status === 'error') statusLabel = '失败';
+            else if (cPhase === 'reviewing') statusLabel = `第 ${cAttempt ?? 1} 稿 · 评审中`;
+            else if (cPhase === 'rewriting') statusLabel = `第 ${cAttempt ?? 2} 稿 · 重写中`;
+            else if (cPhase === 'best_of_n') statusLabel = `已完成 ${wordCount} 字 · 兜底择优`;
+            else if (status === 'streaming') {
+              statusLabel = cAttempt && cAttempt > 1
+                ? `第 ${cAttempt} 稿 · ${wordCount} 字`
+                : `流式中 · ${wordCount} 字`;
+            }
+            else if (status === 'done') statusLabel = `已完成 ${wordCount} 字`;
+            else statusLabel = '';
+            return (
+              <button
+                key={p}
+                role="tab"
+                aria-selected={isActive}
+                type="button"
+                onClick={() => onActiveTabChange(p)}
+                style={{
+                  padding: '8px 14px',
+                  borderRadius: 8,
+                  border: '1px solid ' + (isActive ? 'var(--accent)' : 'var(--border)'),
+                  background: isActive ? 'var(--accent-soft)' : 'var(--surface-white)',
+                  color: 'var(--text)',
+                  fontSize: 13,
+                  fontFamily: 'var(--font-display)',
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}
+              >
+                <span style={{ fontWeight: 500 }}>
+                  {PLATFORM_TRAITS.find((x) => x.key === p)?.name ?? p}
+                </span>
+                {isMain && (
+                  <span
+                    style={{
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 10,
+                      color: 'var(--text-muted)',
+                      letterSpacing: '0.05em',
+                    }}
+                  >
+                    主
+                  </span>
+                )}
+                <span
+                  style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 11,
+                    color:
+                      status === 'streaming' ? 'var(--accent)'
+                      : status === 'done' ? 'var(--success, #2c8a4a)'
+                      : status === 'error' ? 'var(--error, #c0392b)'
+                      : 'var(--text-muted)',
+                    letterSpacing: '0.03em',
+                  }}
+                >
+                  · {statusLabel}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="draft-layout">
+        <aside className="draft-outline">
+          <div className="draft-outline-head">大纲 · {outline?.sections.length ?? 0} 节</div>
+          {outline?.sections.map((s, i) => (
+            <div
+              key={i}
+              className={
+                'draft-outline-item ' +
+                (i === currentSectionIdx && isActiveStreaming ? 'active' : i < currentSectionIdx ? 'done' : '')
+              }
+            >
+              {i + 1}. {s.title}
+            </div>
+          ))}
+        </aside>
+        {/* 给每个 platform 各起一个独立 scroll 容器，切 tab 不丢已流内容 */}
+        {platforms.map((p) => {
+          const entry = draftMap[p];
+          const md = entry?.content_md ?? '';
+          const status = entry?.status ?? 'pending';
+          const isActive = p === activeTab;
+          return (
+            <div
+              key={p}
+              className="draft-stream"
+              ref={(el) => {
+                scrollRefs.current[p] = el;
+              }}
+              style={isActive ? undefined : { display: 'none' }}
+            >
+              {/* v3.4 · critic 评分卡：有评分历史的 tab 上方常驻一张 */}
+              {entry?.last_critic && (
+                <CriticScoreCard
+                  critic={entry.last_critic}
+                  attempt={entry.critic_attempt ?? 1}
+                  runsCount={entry.critic_runs_count ?? 1}
+                  phase={entry.critic_phase}
+                />
+              )}
+              {status === 'error' && entry?.error ? (
+                <Banner kind="error" title={`「${PLATFORM_TRAITS.find((x) => x.key === p)?.name ?? p}」这一条没生成出来`}>
+                  {entry.error}
+                </Banner>
+              ) : md ? (
+                <article
+                  className="article draft-stream-md"
+                  dangerouslySetInnerHTML={{
+                    __html:
+                      renderMarkdown(md) +
+                      (status === 'streaming' ? '<span class="cursor-blink"></span>' : ''),
+                  }}
+                />
+              ) : status === 'pending' ? (
+                <pre className="draft-stream-pre" style={{ color: 'var(--text-muted)' }}>
+                  {'轮到这条排队中，到它了再开始'}
+                </pre>
+              ) : (
+                <pre className="draft-stream-pre" style={{ color: 'var(--text-muted)' }}>
+                  {status === 'streaming' ? '正在等待第一段…' : '点上面的"重新生成"开始'}
+                </pre>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="step-actions">
+        <div className="step-actions-left">
+          <button type="button" className="btn btn-ghost" onClick={onBack} disabled={loading}>← 返回大纲</button>
+        </div>
+        <div className="step-actions-right">
+          <button type="button" className="btn btn-primary" onClick={onNext} disabled={!done && loading}>
+            预览与导出 <span className="btn-arrow">→</span>
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ---------- v3.5 · outline 软等待面板 ----------
+// 用户在 Step 4 点了"生成大纲"但 gather 还在跑时，停在这里给用户选：等还是不等。
+// GatherStatusCard 上面那张卡会同时显示进度（codex 已经几秒）。
+function OutlineWaitPanel({
+  startedAt, onSkip, onBack,
+}: {
+  startedAt: number | null;
+  onSkip: () => void;
+  onBack: () => void;
+}) {
+  const [sec, setSec] = useState(startedAt ? Math.floor((Date.now() - startedAt) / 1000) : 0);
+  useEffect(() => {
+    if (!startedAt) return;
+    const id = setInterval(() => {
+      setSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [startedAt]);
+
+  // 4-6 分钟（240-360 秒）是 codex 联网搜集的典型耗时
+  const typicalAvg = 300;
+  const remainGuess = Math.max(0, typicalAvg - sec);
+  const closeToDone = sec >= 180;
+
+  return (
+    <section className="step-card">
+      <p className="step-card-eyebrow">STEP 05 · WAITING FOR FACTS</p>
+      <h1 className="step-card-title">
+        {closeToDone ? '事实底座快好了，再等一下就能开写' : '事实底座还在搜，可以等也可以不等'}
+      </h1>
+      <p className="step-card-sub">
+        codex 联网搜集已经 {sec} 秒了，
+        {closeToDone
+          ? `估计还差 ${remainGuess} 秒就能拿到。如果你愿意等，等完写出的正文会有更准的数字和案例。`
+          : `一般还要 ${remainGuess} 秒左右。不想等也行，下面直接生成大纲——只是这次模型靠经验写，不挂事实底座。`}
+      </p>
+
+      <div
+        style={{
+          margin: '20px 0',
+          padding: '14px 16px',
+          border: '1px dashed var(--border)',
+          borderRadius: 8,
+          background: 'var(--surface)',
+          fontSize: 13,
+          color: 'var(--text-muted)',
+          lineHeight: 1.7,
+        }}
+      >
+        等也好不等也好，都不会丢已经选好的风格组合。回到 Step 4 也行——idea 没改的话 codex 还在后台继续跑。
+      </div>
+
+      <div className="step-actions">
+        <div className="step-actions-left">
+          <button type="button" className="btn btn-ghost" onClick={onBack}>← 返回 Step 4</button>
+        </div>
+        <div className="step-actions-right">
+          <button type="button" className="btn btn-ghost" onClick={onSkip}>
+            不等了，直接生大纲
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ---------- v3.5 · 后台 codex 搜集状态卡 ----------
+// 挂在 Step 3-5。让用户在选风格 / 等大纲的时候，随时能看到事实底座的搜集状态。
+function GatherStatusCard({
+  status, chars, material, startedAt, elapsedMs, fromCache, error, onSkip, onRetry,
+}: {
+  status: 'idle' | 'running' | 'done' | 'error' | 'skipped';
+  chars: number;
+  material: string;
+  startedAt: number | null;
+  elapsedMs: number;
+  fromCache: boolean;
+  error: string | null;
+  onSkip: () => void;
+  onRetry: () => void;
+}) {
+  // running 状态下：基于 startedAt 自动 tick 出已用秒数，让用户看到时间在动
+  const [tickSec, setTickSec] = useState(0);
+  useEffect(() => {
+    if (status !== 'running' || !startedAt) return;
+    const id = setInterval(() => {
+      setTickSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    setTickSec(Math.floor((Date.now() - startedAt) / 1000));
+    return () => clearInterval(id);
+  }, [status, startedAt]);
+
+  const [expanded, setExpanded] = useState(false);
+
+  let leftLabel = 'CODEX 搜集';
+  let mainText: string;
+  let accent: string;
+  if (status === 'running') {
+    mainText = `正在联网搜集事实 · 已 ${tickSec} 秒（一般 4-6 分钟）`;
+    accent = 'var(--accent)';
+  } else if (status === 'done') {
+    if (fromCache) {
+      mainText = `事实底座已就绪 · ${chars.toLocaleString()} 字 · 命中缓存秒返`;
+    } else {
+      mainText = `事实底座已就绪 · ${chars.toLocaleString()} 字 · 耗时 ${Math.round(elapsedMs / 1000)} 秒`;
+    }
+    accent = 'var(--success, #2c8a4a)';
+  } else if (status === 'error') {
+    mainText = `搜集出了点状况：${error ?? '未知'}`;
+    accent = 'var(--error, #c0392b)';
+  } else if (status === 'skipped') {
+    mainText = '已跳过 · 本次写作不挂事实底座，模型按一般经验写';
+    accent = 'var(--text-muted)';
+  } else {
+    return null;
+  }
+
+  return (
+    <div
+      style={{
+        margin: '12px 0',
+        padding: '10px 14px',
+        border: '1px solid var(--border)',
+        borderLeft: '3px solid ' + accent,
+        borderRadius: 8,
+        background: 'var(--surface)',
+        fontSize: 13,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+        <span
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10,
+            letterSpacing: '0.06em',
+            color: 'var(--text-muted)',
+          }}
+        >
+          {leftLabel}
+        </span>
+        <span style={{ color: 'var(--text)' }}>{mainText}</span>
+        <div style={{ flex: 1 }} />
+        {status === 'running' && (
+          <button
+            type="button"
+            onClick={onSkip}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-muted)',
+              fontSize: 12,
+              cursor: 'pointer',
+              padding: 0,
+            }}
+          >
+            跳过本次搜集
+          </button>
+        )}
+        {(status === 'error' || status === 'skipped') && (
+          <button
+            type="button"
+            onClick={onRetry}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--accent)',
+              fontSize: 12,
+              cursor: 'pointer',
+              padding: 0,
+            }}
+          >
+            重新搜集
+          </button>
+        )}
+        {status === 'done' && material && (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--accent)',
+              fontSize: 12,
+              cursor: 'pointer',
+              padding: 0,
+            }}
+          >
+            {expanded ? '收起' : '展开看素材'}
+          </button>
+        )}
+      </div>
+      {expanded && status === 'done' && material && (
+        <pre
+          style={{
+            marginTop: 10,
+            padding: 10,
+            maxHeight: 320,
+            overflowY: 'auto',
+            background: 'var(--surface-white)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            fontSize: 12,
+            lineHeight: 1.6,
+            color: 'var(--text)',
+            whiteSpace: 'pre-wrap',
+            fontFamily: 'var(--font-sans, inherit)',
+          }}
+        >
+          {material}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+// ---------- Critic 评分卡 ----------
+// v3.4 · 把 reflection loop 的评分可视化。挂在 Step 6 每个 platform tab 的正文上方。
+function CriticScoreCard({
+  critic, attempt, runsCount, phase,
+}: {
+  critic: {
+    total: number;
+    passed: boolean;
+    threshold: number;
+    scores: Step6CriticScores;
+    weakest: string | null;
+    rewrite_hint: string;
+  };
+  attempt: number;
+  runsCount: number;
+  phase?: 'writing' | 'reviewing' | 'rewriting' | 'best_of_n';
+}) {
+  // 状态短语：critic_phase 优先，没传时根据 passed 显示
+  let statusLine: string;
+  if (phase === 'rewriting') statusLine = `不达标，正在带 hint 重写第 ${attempt} 稿…`;
+  else if (phase === 'reviewing') statusLine = '评审中…';
+  else if (phase === 'best_of_n') statusLine = `用完次数 · 落库挑了 ${runsCount} 稿里总分最高的那稿`;
+  else if (critic.passed) statusLine = '过审 · 已通过质量阈值';
+  else statusLine = '未达阈值';
+
+  const dimensions: Array<{ key: keyof Step6CriticScores; label: string }> = [
+    { key: 'structure', label: '结构' },
+    { key: 'depth', label: '深度' },
+    { key: 'analogy', label: '类比' },
+    { key: 'punchline', label: '金句' },
+    { key: 'taboo', label: '禁忌' },
+  ];
+
+  return (
+    <div
+      style={{
+        marginBottom: 14,
+        padding: '12px 14px',
+        border: '1px solid var(--border)',
+        borderLeft: '3px solid ' + (critic.passed ? 'var(--success, #2c8a4a)' : 'var(--accent)'),
+        borderRadius: 8,
+        background: 'var(--surface)',
+        fontSize: 13,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 8 }}>
+        <span style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}>
+          第 {attempt} 稿评分 · {critic.total} / 25
+        </span>
+        <span
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+            color: 'var(--text-muted)',
+            letterSpacing: '0.03em',
+          }}
+        >
+          阈值 {critic.threshold}
+        </span>
+        <span style={{ flex: 1 }} />
+        <span
+          style={{
+            fontSize: 12,
+            color: critic.passed ? 'var(--success, #2c8a4a)' : 'var(--text-muted)',
+          }}
+        >
+          {statusLine}
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: critic.rewrite_hint ? 10 : 0 }}>
+        {dimensions.map(({ key, label }) => {
+          const s = critic.scores[key];
+          const isWeakest = critic.weakest === key;
+          return (
+            <span
+              key={key}
+              style={{
+                padding: '3px 10px',
+                borderRadius: 12,
+                fontSize: 12,
+                fontFamily: 'var(--font-mono)',
+                border: '1px solid ' + (isWeakest ? 'var(--accent)' : 'var(--border)'),
+                background: isWeakest ? 'var(--accent-soft)' : 'var(--surface-white)',
+                color: typeof s === 'number' && s < 3 ? 'var(--accent)' : 'var(--text)',
+                letterSpacing: '0.02em',
+              }}
+            >
+              {label} {typeof s === 'number' ? s : '-'} / 5
+            </span>
+          );
+        })}
+      </div>
+
+      {critic.rewrite_hint && !critic.passed && (
+        <p
+          style={{
+            margin: 0,
+            fontSize: 12,
+            color: 'var(--text-muted)',
+            lineHeight: 1.6,
+          }}
+        >
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, marginRight: 6 }}>HINT</span>
+          {critic.rewrite_hint}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ---------- Step 7 · 预览导出 ----------
+function Step7Preview({
+  previewMd, previewHtml, previewWordCount, layout, setLayout, platform, targetPlatform,
+  onPlatform, refineLoading,
+  panels, togglePanel, onExport, onBack, showToast,
+  articleId, chosenRecommendation, draftMd,
+}: {
+  previewMd: string;
+  previewHtml: string;
+  previewWordCount: number;
+  layout: LayoutKey;
+  setLayout: (l: LayoutKey) => void;
+  platform: PlatformKey;
+  targetPlatform: PlatformKey | null;
+  onPlatform: (p: PlatformKey) => void;
+  refineLoading: boolean;
+  panels: Record<PanelKey, boolean>;
+  togglePanel: (k: PanelKey) => void;
+  onExport: (b: ExportButton) => void;
+  onBack: () => void;
+  showToast: (m: string) => void;
+  articleId: string | null;
+  chosenRecommendation: RecommendCard | null;
+  draftMd: string;
+}) {
+  return (
+    <section className="compose-layout" style={{ padding: 0, maxWidth: '100%' }}>
+      <section className="preview-card">
+        <div className="preview-head">
+          <div className="preview-head-left">
+            <span className="preview-eyebrow">PREVIEW</span>
+            <div className="preview-meta">
+              <span className="tag">{PLATFORM_TRAITS.find((p) => p.key === platform)?.name}</span>
+              <span className="tag">{LAYOUTS.find((l) => l.key === layout)?.name}</span>
+              <span className="tag">{previewWordCount} 字</span>
+              {refineLoading && <span className="tag" style={{ color: 'var(--accent)' }}>改写中…</span>}
+            </div>
+          </div>
+          <div className="preview-toolbar">
+            <button type="button" className="icon-btn" title="返回正文流" onClick={onBack}>
+              <RetryIcon />
+            </button>
+            <button type="button" className="icon-btn" title="复制 Markdown" onClick={() => {
+              navigator.clipboard?.writeText(previewMd).catch(() => {});
+              showToast('已复制 Markdown');
+            }}>
+              <CopyIcon />
+            </button>
+          </div>
+        </div>
+        <div className="preview-body">
+          <article className="article" data-layout={layout} dangerouslySetInnerHTML={{ __html: previewHtml }} />
+        </div>
+      </section>
+
+      <aside className="drawer">
+        <Panel title="一键切换平台" icon={<PlatformIcon />} open={panels.platform} onToggle={() => togglePanel('platform')}>
+          <p style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '0 0 10px' }}>
+            切换后会按目标平台风格改写。第一次切换有 20-40 秒等待。
+          </p>
+          <div className="platform-list">
+            {PLATFORM_TRAITS.map((p) => {
+              const active = platform === p.key;
+              const isOriginal = (targetPlatform ?? 'wechat') === p.key;
+              return (
+                <div
+                  key={p.key}
+                  className={'platform-row' + (active ? ' active' : '')}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onPlatform(p.key)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPlatform(p.key); } }}
+                >
+                  <div>
+                    <div className="platform-name">
+                      {p.name}
+                      {isOriginal && <span style={{ marginLeft: 8, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-muted)', letterSpacing: '0.06em' }}>原文</span>}
+                    </div>
+                    <div className="platform-info">{p.ui_hint}</div>
+                  </div>
+                  <span className="switch-mark">{active ? '●' : '↻'}</span>
+                </div>
+              );
+            })}
+          </div>
+        </Panel>
+
+        <Panel title="调整排版" icon={<LayoutIcon />} open={panels.layout} onToggle={() => togglePanel('layout')}>
+          <p style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '0 0 10px' }}>
+            预览区实时变样式。导出时按所选主题输出 HTML/MD。
+          </p>
+          <div className="layout-grid">
+            {LAYOUTS.map((l) => (
+              <button
+                key={l.key}
+                type="button"
+                className={'layout-card' + (layout === l.key ? ' active' : '')}
+                onClick={() => setLayout(l.key)}
+              >
+                <div className="layout-preview">
+                  {l.key === 'standard' && <><div className="lp-bar title"/><div className="lp-bar accent" style={{ height: 3, width: '30%' }}/><div className="lp-bar"/><div className="lp-bar short"/></>}
+                  {l.key === 'lively' && <><div className="lp-bar accent" style={{ height: 6, width: '80%', margin: '0 auto' }}/><div className="lp-bar"/><div className="lp-bar short"/><div className="lp-bar accent" style={{ opacity: 0.5 }}/></>}
+                  {l.key === 'minimal' && <><div className="lp-bar title" style={{ opacity: 0.5 }}/><div className="lp-bar"/><div className="lp-bar"/><div className="lp-bar short"/></>}
+                </div>
+                <div className="layout-name">{l.name}</div>
+                <div className="layout-platform-hint">{l.hint}</div>
+              </button>
+            ))}
+          </div>
+        </Panel>
+
+        <Panel title="自动配图" icon={<ImageIcon />} open={panels.image} onToggle={() => togglePanel('image')}>
+          <ImagePanel
+            articleContent={draftMd}
+            fingerprintId={
+              chosenRecommendation?.selected_authors
+                ?.slice()
+                .sort((a, b) => b.weight - a.weight)[0]?.fingerprint_id ?? null
+            }
+            slotCount={3}
+            autoStart
+          />
+        </Panel>
+
+        <Panel title="一键导出" icon={<ExportIcon />} open={panels.export} onToggle={() => togglePanel('export')}>
+          <div className="export-grid">
+            {EXPORTS.map((e) => {
+              const Icon = e.icon;
+              return (
+                <button key={e.label} type="button" className="export-btn" onClick={() => onExport(e)}>
+                  <Icon />
+                  {e.label}
+                </button>
+              );
+            })}
+          </div>
+          <div className="export-cta">
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => showToast('已发往公众号草稿箱（mock）')}
+            >
+              一键发往公众号草稿箱 <span className="btn-arrow">→</span>
+            </button>
+          </div>
+        </Panel>
+
+        <Panel title="拆解此文产出逻辑" icon={<ExplainerIcon />} open={panels.explainer} onToggle={() => togglePanel('explainer')}>
+          <CompositionExplainer
+            articleId={articleId}
+            compositionSummary={chosenRecommendation?.composition_summary}
+            whyMatch={chosenRecommendation?.why_match}
+            targetPlatform={targetPlatform}
+            contentMd={draftMd}
+          />
+        </Panel>
+      </aside>
+    </section>
+  );
+}
+
+function ExplainerIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="8" x2="12" y2="12" />
+      <line x1="12" y1="16" x2="12.01" y2="16" />
+    </svg>
+  );
+}
+
+function MatchBadge({ q }: { q: 'exact' | 'cross-platform' | 'generic' }) {
+  const label = q === 'exact' ? '专属指纹' : q === 'cross-platform' ? '跨平台改写' : '通用';
+  const cls = q === 'exact' ? 'match-exact' : q === 'cross-platform' ? 'match-cross' : 'match-generic';
+  return <span className={`match-badge ${cls}`}>{label}</span>;
+}
+
+// ---------- 灵感参考 · 跨博主碎片（轻量内联，不入 prompt） ----------
+function InspirationPanel({
+  category, onCategoryChange, platform, items, loading, open, onToggle,
+}: {
+  category: ArticleCategory | null;
+  onCategoryChange: (c: ArticleCategory | null) => void;
+  platform: PlatformKey | null;
+  items: InspirationFragment[];
+  loading: boolean;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const platformName = platform ? getPlatform(platform).name : null;
+  return (
+    <section
+      className="step-card"
+      style={{ background: 'var(--surface)', padding: '20px 24px', gap: 12 }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <div>
+          <p className="step-card-eyebrow" style={{ marginBottom: 4 }}>INSPIRATION · 灵感参考</p>
+          <p style={{ fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 500, color: 'var(--text)', margin: 0 }}>
+            我要写哪一类？{platformName && (
+              <span style={{ marginLeft: 8, fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', letterSpacing: '0.05em' }}>
+                {platformName} · 只看参考、不进 prompt
+              </span>
+            )}
+          </p>
+        </div>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={onToggle}
+          style={{ fontSize: 12 }}
+        >
+          {open ? '收起' : '展开'}
+        </button>
+      </div>
+
+      {open && (
+        <>
+          <div className="idea-chips" style={{ gap: 8 }}>
+            <button
+              type="button"
+              className="idea-chip"
+              onClick={() => onCategoryChange(null)}
+              style={category === null ? {
+                background: 'var(--surface-white)',
+                color: 'var(--text)',
+                borderColor: 'var(--border-medium)',
+              } : undefined}
+            >
+              全部 · 跳过
+            </button>
+            {ARTICLE_CATEGORIES.map((c) => (
+              <button
+                key={c}
+                type="button"
+                className="idea-chip"
+                onClick={() => onCategoryChange(c)}
+                style={category === c ? {
+                  background: 'var(--surface-white)',
+                  color: 'var(--text)',
+                  borderColor: 'var(--border-medium)',
+                } : undefined}
+              >
+                {c}
+              </button>
+            ))}
+          </div>
+
+          {loading && (
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '4px 0 0' }}>
+              正在召回跨博主碎片…
+            </p>
+          )}
+
+          {!loading && items.length === 0 && (
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '4px 0 0' }}>
+              这一类在指纹库里还没有可参考的碎片。{category ? '试试切到「全部」。' : '先去拆几位博主吧。'}
+            </p>
+          )}
+
+          {!loading && items.length > 0 && (
+            <div className="strategies-grid">
+              {items.map((it) => (
+                <div key={it.id} className="strategy-card">
+                  <div className="strategy-card-head">
+                    {it.author_name && <span className="tag">{it.author_name}</span>}
+                    {it.tag && <span className="tag tag-lang">{it.tag}</span>}
+                    {it.category && <span className="tag">{it.category}</span>}
+                  </div>
+                  {it.title && (
+                    <div className="strategy-card-desc" style={{ fontWeight: 500 }}>
+                      {it.title}
+                    </div>
+                  )}
+                  {it.description && (
+                    <div className="strategy-card-desc">{it.description}</div>
+                  )}
+                  {it.example && (
+                    <div className="strategy-card-example">「{it.example}」</div>
+                  )}
+                  {it.when_to_use && (
+                    <div className="strategy-card-when">何时用：{it.when_to_use}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+// ---------- 共用 Banner ----------
+function Banner({ kind, title, children }: { kind: 'info' | 'loading' | 'error'; title: string; children: ReactNode }) {
+  let bg = 'var(--surface)';
+  let border = 'var(--border)';
+  let titleColor = 'var(--text)';
+  if (kind === 'error') {
+    bg = 'color-mix(in srgb, var(--error) 8%, var(--surface))';
+    border = 'color-mix(in srgb, var(--error) 35%, transparent)';
+  } else if (kind === 'loading') {
+    bg = 'var(--surface-light)';
+    border = 'var(--border-medium)';
+    titleColor = 'var(--text)';
+  }
+  return (
+    <div style={{
+      background: bg, border: `1px solid ${border}`, borderRadius: 12,
+      padding: '14px 18px', display: 'flex', flexDirection: 'column', gap: 6,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: titleColor, fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 500 }}>
+        {kind === 'loading' && <span className="pulse-dot pulse-soft" />}
+        {title}
+      </div>
+      <div style={{ color: 'var(--text-secondary)', fontSize: 13, lineHeight: 1.7 }}>{children}</div>
+    </div>
+  );
+}
+
+// ---------- 异步辅助：fingerprint 名字查询 ----------
+async function fetchFingerprintNames(ids: string[]): Promise<Record<string, { author_name: string; platform: string | null }>> {
+  if (ids.length === 0) return {};
+  try {
+    // 这个端点由 Agent F 负责实现，但我们要预留 fallback：
+    // 暂时通过 /api/recommend 在前端 response 里已经返回了 reason，
+    // 这里只是补 author_name。Agent F 的 /api/sites/... 不直接给这个；
+    // 我们做一次 best-effort：把 fingerprint_id 短码作为名字。
+    const params = new URLSearchParams();
+    params.set('ids', ids.join(','));
+    const resp = await fetch(`/api/fingerprints/names?${params.toString()}`);
+    if (resp.ok) {
+      const j = await resp.json();
+      if (j && typeof j === 'object') return j as Record<string, { author_name: string; platform: string | null }>;
+    }
+  } catch {/* ignore */}
+  // fallback：缺数据时用 id 前缀做名字
+  const out: Record<string, { author_name: string; platform: string | null }> = {};
+  for (const id of ids) out[id] = { author_name: `指纹 ${id.slice(0, 6)}`, platform: null };
+  return out;
+}
+
+// ---------- 风格配方挑选面板（Step 4 上方）----------
+interface RecipeSummary {
+  id: string;
+  name: string;
+  platform_key: string;
+  fragment_ids: string[];
+  notes: string | null;
+}
+
+interface RecipeDetail {
+  id: string;
+  name: string;
+  platform_key: string;
+  notes: string | null;
+  fragments: Array<{
+    id: string;
+    author_name: string | null;
+    tag: string | null;
+    title: string | null;
+    description: string | null;
+    example: string | null;
+    when_to_use: string | null;
+    why_works: string | null;
+  }>;
+}
+
+/**
+ * 把配方碎片转成一段可读的 prompt 注入文本。
+ * 调用方把这段塞进 customNotes，下游 outline / draft prompt 已经会把 customNotes 喂给模型。
+ */
+function recipeToNotes(detail: RecipeDetail): string {
+  const lines: string[] = [`# 风格配方 · ${detail.name}`];
+  if (detail.notes) lines.push(`备注：${detail.notes}`);
+  lines.push('');
+  lines.push('参考下面这些策略碎片来写（按出现顺序优先级递减）：');
+  for (const f of detail.fragments) {
+    const head = [f.title ?? f.tag ?? '碎片', f.author_name ? `（来自 ${f.author_name}）` : '']
+      .join('');
+    lines.push(`- ${head}`);
+    if (f.description) lines.push(`  - ${f.description}`);
+    if (f.example) lines.push(`  - 例：「${f.example}」`);
+    if (f.when_to_use) lines.push(`  - 适用：${f.when_to_use}`);
+  }
+  return lines.join('\n');
+}
+
+function RecipePickerPanel({
+  platformKey,
+  selectedRecipeId,
+  onSelect,
+}: {
+  platformKey: PlatformKey | null;
+  selectedRecipeId: string | null;
+  onSelect: (recipeId: string | null, notes: string | null) => void;
+}) {
+  const [recipes, setRecipes] = useState<RecipeSummary[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!platformKey) return;
+    setLoading(true);
+    fetch(`/api/recipes?platform=${encodeURIComponent(platformKey)}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d: { items: RecipeSummary[] }) => setRecipes(d.items ?? []))
+      .catch(() => setRecipes([]))
+      .finally(() => setLoading(false));
+  }, [platformKey]);
+
+  const pick = async (recipeId: string) => {
+    if (selectedRecipeId === recipeId) {
+      // 再点一次 = 取消
+      onSelect(null, null);
+      return;
+    }
+    // 拉详情拿 fragments
+    const r = await fetch(`/api/recipes/${recipeId}`);
+    if (!r.ok) return;
+    const d = (await r.json()) as { recipe: RecipeDetail };
+    onSelect(recipeId, recipeToNotes(d.recipe));
+  };
+
+  return (
+    <section
+      className="step-card"
+      style={{ background: 'var(--surface)', padding: '20px 24px', gap: 12 }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <p className="step-card-eyebrow" style={{ marginBottom: 4 }}>RECIPE · 风格配方</p>
+          <p style={{
+            fontFamily: 'var(--font-display)',
+            fontSize: 16,
+            fontWeight: 500,
+            color: 'var(--text)',
+            margin: 0,
+          }}>
+            用现成配方？
+            <span style={{
+              marginLeft: 8,
+              fontSize: 12,
+              color: 'var(--text-muted)',
+              fontFamily: 'var(--font-mono)',
+              letterSpacing: '0.05em',
+            }}>
+              选了之后会把碎片自动写进下方备注，再点一次取消
+            </span>
+          </p>
+        </div>
+        <a href="/recipes" className="btn btn-ghost" style={{ fontSize: 12 }}>
+          管理配方 →
+        </a>
+      </div>
+
+      {loading && <div style={{ opacity: 0.6, fontSize: 12 }}>加载…</div>}
+      {!loading && recipes.length === 0 && (
+        <div style={{ opacity: 0.65, fontSize: 12 }}>
+          这个平台还没有配方。<a href="/recipes" style={{ color: 'var(--accent)' }}>去 /recipes 建一份</a>，或者跳过这步直接用下方"指纹微调"。
+        </div>
+      )}
+      {!loading && recipes.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {recipes.map((r) => {
+            const active = r.id === selectedRecipeId;
+            return (
+              <button
+                key={r.id}
+                type="button"
+                className={'idea-chip' + (active ? ' active' : '')}
+                onClick={() => void pick(r.id)}
+                title={r.notes ?? `${r.fragment_ids.length} 个碎片`}
+                style={
+                  active
+                    ? {
+                        background: 'var(--surface-white)',
+                        color: 'var(--text)',
+                        borderColor: 'var(--border-medium)',
+                      }
+                    : undefined
+                }
+              >
+                {r.name} · {r.fragment_ids.length} 片
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}

@@ -1,0 +1,103 @@
+{
+  "generated_at": 1779560992276,
+  "rows": [
+    {
+      "label": "知乎专栏",
+      "url": "https://zhuanlan.zhihu.com/p/679162970",
+      "detect": {
+        "platform": "知乎",
+        "is_wechat": false,
+        "is_supported_for_crawl": true,
+        "hint": null
+      },
+      "ok": false,
+      "expect": "success-or-blocked",
+      "matched": true,
+      "title": null,
+      "content_len": 0,
+      "image_count": 0,
+      "host": null,
+      "source": null,
+      "error": {
+        "reason": "blocked",
+        "message": "这个站点把我拦住了，可能需要登录或被反爬"
+      }
+    },
+    {
+      "label": "少数派",
+      "url": "https://sspai.com/post/79453",
+      "detect": {
+        "platform": "少数派",
+        "is_wechat": false,
+        "is_supported_for_crawl": true,
+        "hint": null
+      },
+      "ok": true,
+      "expect": "success",
+      "matched": true,
+      "title": "如何在网页上划线和批注？推荐五彩插件 - 少数派",
+      "content_len": 3709,
+      "image_count": 7,
+      "host": "sspai.com",
+      "source": "cheerio"
+    },
+    {
+      "label": "优设网",
+      "url": "https://www.uisdc.com/google-search",
+      "detect": {
+        "platform": "优设",
+        "is_wechat": false,
+        "is_supported_for_crawl": true,
+        "hint": null
+      },
+      "ok": true,
+      "expect": "success",
+      "matched": true,
+      "title": "2022 年的 Google 是如何重塑搜索体验的？官方总结了5个方面！",
+      "content_len": 3807,
+      "image_count": 6,
+      "host": "www.uisdc.com",
+      "source": "cheerio"
+    },
+    {
+      "label": "Generic 兜底（overreacted.io）",
+      "url": "https://overreacted.io/a-complete-guide-to-useeffect/",
+      "detect": {
+        "platform": "unknown",
+        "is_wechat": false,
+        "is_supported_for_crawl": true,
+        "hint": "这个站点没有专门适配，会用通用正文提取，可能漏点东西"
+      },
+      "ok": true,
+      "expect": "success",
+      "matched": true,
+      "title": "A Complete Guide to useEffect — overreacted",
+      "content_len": 64606,
+      "image_count": 1,
+      "host": "overreacted.io",
+      "source": "cheerio"
+    },
+    {
+      "label": "公众号（应被拒绝）",
+      "url": "https://mp.weixin.qq.com/s/somefakeid",
+      "detect": {
+        "platform": "公众号",
+        "is_wechat": true,
+        "is_supported_for_crawl": false,
+        "hint": "公众号反爬较硬，工具不爬，请直接粘贴正文"
+      },
+      "ok": false,
+      "expect": "wechat-error",
+      "matched": true,
+      "title": null,
+      "content_len": 0,
+      "image_count": 0,
+      "host": null,
+      "source": null,
+      "error": {
+        "reason": "wechat",
+        "message": "公众号反爬较硬，工具不爬，请直接粘贴正文"
+      }
+    }
+  ]
+}

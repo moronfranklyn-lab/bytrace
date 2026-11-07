@@ -1,0 +1,52 @@
+# deps
+node_modules/
+
+# next
+.next/
+out/
+next-env.d.ts
+
+# typescript incremental build cache
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# local db
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# env
+.env.local
+.env*.local
+
+# misc
+.DS_Store
+*.log
+npm-debug.log*
+.idea/
+.vscode/
+
+# stray root db (real db lives in data/)
+/autoarticle.db
+
+# local build caches (node-gyp / npm) redirected into workspace for sandboxed builds
+.cache/
+
+# local env backup
+.env.local.backup-*
+
+# internal working notes (not part of the deliverable)
+internal/
+
+# 生成物：双击启动图标（.app 包）
+dist/
+
+# 启动器日志
+.bytrace-dev.log
+
+# 生成物：图标稿与打包中间文件（可由 scripts/make-icns.py 重新生成）
+build/
+
+# 个人 IP 参考图（含真人形象，仅保留在本机，不入库）
+data/author-skill/assets/ip/

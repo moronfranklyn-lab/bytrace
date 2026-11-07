@@ -1,13 +1,7 @@
-# 怎么填 API 密钥（3 种方法，任选一种）
+# 怎么填 API 密钥（4 种方法，任选一种）
 
-配置文件是 `autoarticle/.env.local`。
+配置文件是项目根目录下的 `.env.local`（和 `README.md` 同一层）。
 **它名字以点开头，是隐藏文件，Finder 默认不显示** —— 所以你觉得"找不到"是正常的，不是文件不存在。
-
-已经确认它就在：
-
-```
-/Volumes/XiaoBeiDev/资料合集/项目合集/公众号/autoarticle/.env.local
-```
 
 里面有两行空着等你填（**第 20 行**和**第 43 行**）：
 
@@ -46,14 +40,33 @@ BYTRACE_SEARCH_API_KEY=         # ← 第 43 行：火山方舟（豆包）的 k
 1. 打开「文本编辑」（Launchpad 或 Spotlight 搜 TextEdit）
 2. 菜单 **文件 → 打开**（`Cmd + O`）
 3. 在弹出的对话框里按 **`Cmd + Shift + G`**（前往文件夹）
-4. 粘贴这一整行，回车：
-
-```
-/Volumes/XiaoBeiDev/资料合集/项目合集/公众号/autoarticle/.env.local
-```
+4. 粘贴你的项目文件夹路径，末尾加上 `/.env.local`（例如 `~/projects/bytrace/.env.local`），回车
 
 5. 因为以点开头，对话框里可能仍然看不见它，但**直接回车也能打开**
 6. 填好两个 key，`Cmd + S` 保存
+
+---
+
+## 方法四：让 AI 帮你填（不知道选什么模型时推荐）
+
+你不需要懂每一行配置是什么意思。把模板丢给任意一个 AI（Kimi / Claude / ChatGPT 都行），让它按你的情况生成配置。
+
+**第一步**：把 `.env.local.example` 的全部内容复制给 AI，然后发这段话：
+
+> 这是我应用的配置模板，请帮我填好：
+> 1. 主模型我想用：____（MiMo / 豆包 / OpenAI 兼容接口 / 本机 Claude 订阅，填一个）
+> 2. 审查模型我想用：____（建议和主模型不同家；也可以写"留空"）
+> 3. 联网搜索我用：____（豆包火山方舟 / 免 key 的 DuckDuckGo）
+>
+> 要求：输出一份完整的 .env.local 内容，**API Key 的位置写 YOUR_KEY_HERE**，其他按我的选择填好；不要动注释结构；最后告诉我 Key 分别要粘在哪一行。
+
+**第二步**：把 AI 输出的内容整体粘进 `.env.local`（用上面方法一到三任意一种打开）。
+
+**第三步**：自己把 Key 粘到 `YOUR_KEY_HERE` 的位置。
+
+> ⚠️ **Key 永远不要发给 AI**。AI 只需要知道"用哪家、哪个型号"，不需要、也不应该看到真正的 Key。
+
+**第四步**：启动应用后打开 `http://127.0.0.1:3100/api/health` 自检。看到 `"ok": true` 就是全配好了；哪项不对，把页面上的提示原样发给 AI，它会告诉你改哪一行。
 
 ---
 
@@ -86,7 +99,7 @@ BYTRACE_SEARCH_API_KEY=         # ← 第 43 行：火山方舟（豆包）的 k
 双击 `填写API密钥.command` 时它会自动检查；也可以手动跑：
 
 ```bash
-cd /Volumes/XiaoBeiDev/资料合集/项目合集/公众号/autoarticle
+cd 你的项目文件夹路径
 curl -s http://127.0.0.1:3100/api/health
 ```
 
